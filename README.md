@@ -1,6 +1,7 @@
-# Project title
+# Market-Implied Distributions Project
 
-The main documentation is in this Jupyter notebook:
+This repository contains analysis and computation for option-implied distributions.
 
-- [View README.ipynb on GitHub](./README.ipynb)
-- Or via nbviewer (better rendering): <nbviewer-link-here>
+For the full rendered notebook (with tables and plots), see:
+
+[project.ipynb on nbviewer](https://nbviewer.org/github/swbuchanan/market-implied-stock-distributions/blob/main/project.ipynb)
