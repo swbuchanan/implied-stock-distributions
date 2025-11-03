@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install nbconvert jupyter pandas matplotlib
+          pip install nbconvert jupyter pandas matplotlib scipy datetime numpy
           # add your other deps here
 
       - name: Execute notebook in-place
