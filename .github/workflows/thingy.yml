@@ -1,0 +1,42 @@
+name: Convert README.ipynb to README.md
+
+on:
+  push:
+    paths:
+      - "README.ipynb"
+      - ".github/workflows/notebook-to-readme.yml"
+  workflow_dispatch: {}
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install nbconvert jupyter
+
+      - name: Convert README.ipynb to README.md
+        run: |
+          jupyter nbconvert --to markdown README.ipynb --output README.md
+
+      # Optional: commit the generated README.md back to the repo
+      - name: Commit and push changes
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if git status --porcelain | grep README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "Auto-generate README.md from README.ipynb" || echo "No changes to commit"
+            git push
+          fi
