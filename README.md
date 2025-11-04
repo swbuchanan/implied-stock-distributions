@@ -4,4 +4,4 @@ This repository contains analysis and computation for option-implied distributio
 
 For the full rendered notebook (with tables and plots), see:
 
-[project.ipynb on nbviewer](https://nbviewer.org/github/swbuchanan/market-implied-stock-distributions/blob/main/project.ipynb)
+[project.ipynb on nbviewer](https://nbviewer.org/github/swbuchanan/implied-stock-distributions/blob/main/project.ipynb)
