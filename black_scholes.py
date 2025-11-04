@@ -92,11 +92,11 @@ def implied_volatility_call(market_price, S0, K, t, r, sigma_bounds=(1e-7, 20)):
         return np.nan
     
 
-def iv_call_v2(market_price, S, K, T, r, q=0, vol_lo=1e-12, vol_hi=50, max_hi=2000.0, xtol=1e-12, rtol=1e-12, maxiter=200):
+def iv_call_v2(market_price, S0, K, t, r, q=0, vol_lo=1e-12, vol_hi=50, max_hi=2000.0, xtol=1e-12, rtol=1e-12, maxiter=200):
 
     # 2) Define the objective
     def _err(sig):
-        return bs_call(S, K, sig, T, r) - market_price
+        return bs_call(S0, K, sig, t, r) - market_price
 
     # 3) Make sure the bracket straddles zero; expand vol_hi if needed
     f_lo = _err(vol_lo)
