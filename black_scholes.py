@@ -137,3 +137,16 @@ def implied_volatility_put(market_price, S0, K, t, r, sigma_bounds=(1e-6, 2)):
         return brentq(objective, *sigma_bounds)
     except ValueError:
         return np.nan
+
+
+def bs_implied_volatility(option_type, market_price, S0, K, t, r, sigma_bounds=(1e-6, 2)):
+    """
+    Simple wrapper to use the other functions to calculate implied volatility for either a call or a put.
+    """
+    if option_type not in ["call", "put"]:
+        raise ValueError("Invalid option type.")
+
+    if option_type == "call":
+        return implied_volatility_call(market_price, S0, K, t, r, sigma_bounds)
+    elif option_type == "put":
+        return implied_volatility_put(market_price, S0, K, t, r, sigma_bounds)
