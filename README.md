@@ -10,4 +10,6 @@ we numerically recover the pdf.
 
 For the full rendered notebook (with tables and plots), see:
 
-[project.ipynb on nbviewer](https://nbviewer.org/github/swbuchanan/implied-stock-distributions/blob/main/project.ipynb)
+[My project on nbviewer](https://nbviewer.org/github/swbuchanan/implied-stock-distributions/blob/main/project.ipynb)
+
+or click project.ipynb in the github repository.
