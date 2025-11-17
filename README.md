@@ -12,4 +12,4 @@ For the full rendered notebook (with tables and plots), see:
 
 [My project on nbviewer](https://nbviewer.org/github/swbuchanan/implied-stock-distributions/blob/main/project.ipynb)
 
-or click project.ipynb in the github repository.
+or look at project.ipynb, project.html, or project.pdf in the github repository.
