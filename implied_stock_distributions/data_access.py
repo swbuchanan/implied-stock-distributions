@@ -40,6 +40,32 @@ def discover_data_files(
 
     return files_by_year, files
 
+def build_chain_catalog() -> pd.DataFrame:
+    """
+    Build the chain catalogue from the processed data.
+    """
+    parts = []
+
+    _, data_files = discover_data_files()
+
+    for path in data_files:
+        chains = (
+            pd.read_parquet(
+                path,
+                columns=CHAIN_COLUMNS,
+            )
+            .drop_duplicates()
+        )
+
+        chains["parquet_path"] = str(path)
+        parts.append(chains)
+
+    return (
+        pd.concat(parts, ignore_index=True)
+        .sort_values(CHAIN_COLUMNS)
+        .reset_index(drop=True)
+    )
+
 
 def load_chain_catalog() -> pd.DataFrame:
     """Load the chain catalogue created during preprocessing."""

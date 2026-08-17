@@ -474,9 +474,8 @@ wheels = [
 [[package]]
 name = "implied-stock-distributions"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
-    { name = "ipykernel" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
@@ -485,9 +484,13 @@ dependencies = [
     { name = "yfinance" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "pandas", specifier = ">=3.0.5" },
@@ -495,6 +498,9 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.18.0" },
     { name = "yfinance", specifier = ">=1.6.0" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ipykernel", specifier = ">=7.3.0" }]
 
 [[package]]
 name = "ipykernel"
