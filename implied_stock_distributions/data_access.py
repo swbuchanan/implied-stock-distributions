@@ -5,16 +5,11 @@ import pandas as pd
 from .config import (
     ANALYSIS_YEARS,
     CHAIN_CATALOG_PATH,
+    CHAIN_COLUMNS,
     PROJECT_ROOT,
     SPX_PROCESSED_DIR,
 )
 
-
-CHAIN_COLUMNS = [
-    "data_date",
-    "expiration_date",
-    "target_dte_days",
-]
 
 
 def discover_data_files(
@@ -147,3 +142,36 @@ def iter_chains(catalog: pd.DataFrame):
             )
 
             yield key, chain
+
+
+
+def load_random_chain(
+    catalog: pd.DataFrame,
+    target_dte_days: int | None = None,
+    random_state: int | None = None,
+) -> tuple[pd.Series, pd.DataFrame]:
+    """
+    Randomly select and load one option chain.
+    
+    Returns a tuple containing the information used to specify a chain,
+    together with the chain itself.
+    """
+
+    candidates = catalog
+
+    if target_dte_days is not None:
+        candidates = candidates.loc[
+            candidates["target_dte_days"].eq(target_dte_days)
+        ]
+
+    if candidates.empty:
+        raise ValueError(
+            f"No chains found for target DTE {target_dte_days}"
+        )
+
+    info = candidates.sample(
+        n=1,
+        random_state=random_state,
+    ).iloc[0]
+
+    return info, load_chain(info)

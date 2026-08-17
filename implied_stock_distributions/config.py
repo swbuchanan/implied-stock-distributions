@@ -14,6 +14,12 @@ CHAIN_CATALOG_PATH = (
     SPX_PROCESSED_DIR / "chain_catalog.parquet"
 )
 
+CHAIN_COLUMNS = [
+    "data_date",
+    "expiration_date",
+    "target_dte_days",
+]
+
 # Analysis sample
 ANALYSIS_YEARS: tuple[int, ...] = (
     2005,
