@@ -283,4 +283,118 @@ def evaluate_risk_neutral_prediction_from_chain_iv_smoothing(
     }
 
 
+
+def physical_density_from_rn(fQ, s_min, s_max, n_grid=500, gamma=4):
+    """
+    Convert a callable risk-neutral pdf fQ(s) into a callable physical pdf fP(s)
+    under a CRRA/power-utility assumption with coefficient gamma.
+
+    Parameters
+    ----------
+    fQ : callable
+        Function fQ(s): risk-neutral pdf (should integrate to 1 over its support).
+    s_min, s_max : float
+        Bounds of the support (integration domain).
+    n_grid : int, optional
+        Number of grid points used for numerical integration and interpolation (default 500).
+    gamma : float, optional
+        Coefficient of relative risk aversion (default 4).
+        See Taylor's book for some reasons why I chose the value 4.
+        (Basically it was calculated previously by some authors
+        for S&P 500 options.)
+
+    Returns
+    -------
+    fP_func : callable
+        Function fP(s): normalized physical (real-world) pdf.
+    s_grid : ndarray
+        Grid used for normalization and interpolation.
+    fP_grid : ndarray
+        Values of fP(s) on that grid.
+
+    Notes
+    -----
+    f_P(s) = (s^gamma / E_Q[S_T^gamma]) * f_Q(s)
     
+    """
+    # evaluate fQ on a grid
+    s_grid = np.linspace(s_min, s_max, n_grid)
+    fQ_grid = fQ(s_grid)
+    fQ_grid = np.clip(fQ_grid, 0, None)  # remove tiny negatives
+
+    # compute E_Q[S_T^gamma]
+    Z = np.trapezoid((s_grid ** gamma) * fQ_grid, s_grid)
+
+    fP_grid = (s_grid ** gamma) * fQ_grid / Z
+
+    # normalize
+    norm = np.trapezoid(fP_grid, s_grid)
+    if norm > 0:
+        fP_grid /= norm
+
+    fP_func = CubicSpline(s_grid, fP_grid, extrapolate=False)
+
+    return fP_func, s_grid, fP_grid
+
+# I think we prefer this version since we're using the cached densities
+def physical_density_from_rn_grid(
+    strike_grid,
+    fQ,
+    gamma,
+):
+    strike_grid = np.asarray(strike_grid, dtype=float)
+    fQ = np.asarray(fQ, dtype=float)
+
+    # Scaling by a constant does not change the normalized density,
+    # but helps with numerical stability.
+    reference_price = np.median(strike_grid)
+
+    weights = (
+        strike_grid / reference_price
+    ) ** gamma
+
+    unnormalized_fP = weights * fQ
+
+    Z = np.trapezoid(
+        unnormalized_fP,
+        strike_grid,
+    )
+
+    if not np.isfinite(Z) or Z <= 0:
+        raise ValueError(
+            "Could not normalize physical density."
+        )
+
+    fP = unnormalized_fP / Z
+
+    return fP
+
+
+# Objective function to minimize with respect to gamma
+def average_relative_crps_for_gamma(
+    gamma,
+    cached_predictions,
+):
+    scores = []
+
+    for obs in cached_predictions:
+
+        strike_grid = obs["strike_grid"]
+        fQ = obs["fQ"]
+        realized_value = obs["realized_value"]
+
+        fP = physical_density_from_rn_grid(
+            strike_grid=strike_grid,
+            fQ=fQ,
+            gamma=gamma,
+        )
+
+        score = crps_from_density_grid(
+            strike_grid=strike_grid,
+            density=fP,
+            realized_value=realized_value,
+        )
+
+        scores.append(score)
+
+    return np.mean(scores)
