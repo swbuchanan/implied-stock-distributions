@@ -1,4 +1,3 @@
-````markdown
 # SPX Option-Implied Probability Distributions
 
 This project studies how probability distributions for future S&P 500 levels can be extracted from SPX option prices and how well they match realized outcomes.
