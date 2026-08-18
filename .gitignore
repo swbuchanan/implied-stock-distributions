@@ -1,1 +1,5 @@
 *.txt
+data/raw/*
+data/processed/*
+*.parquet
+*.pkl
