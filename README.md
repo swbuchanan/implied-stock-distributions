@@ -11,7 +11,7 @@ From historical option chains, the project:
 - explores a simple transformation from risk-neutral to **physical probabilities** using a CRRA pricing kernel.
 
 The implementation is in Python, with analysis presented in Jupyter notebooks.
-
+See `notebooks/02_project.ipynb` or `reports/02_project.html` for the main reports.
 ---
 
 ## Motivation
