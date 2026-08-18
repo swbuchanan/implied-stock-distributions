@@ -23,20 +23,14 @@ def estimate_forward_and_rate(
 
     quotes = chain.copy()
 
-    if "mid_price" not in quotes.columns:
-        quotes["mid_price"] = (
-            quotes["bid_price"] + quotes["ask_price"]
-        ) / 2
-
     quotes["quote_spread"] = (
         quotes["ask_price"] - quotes["bid_price"]
     )
 
     # Prefer matched pairs for which both quotes are two-sided.
-    if "quote_is_two_sided" in quotes.columns:
-        quotes = quotes.loc[
-            quotes["quote_is_two_sided"].fillna(False)
-        ]
+    quotes = quotes.loc[
+        quotes["quote_is_two_sided"].fillna(False)
+    ]
 
     calls = (
         quotes.loc[
@@ -93,21 +87,20 @@ def estimate_forward_and_rate(
         )
 
     time_values = (
-        # ((chain["expiration_date"] - chain["data_date"]).dt.days / 365.25)
         chain["time_to_expiry_years"]
         .dropna()
-        .to_numpy(dtype=float)
+        .unique()
     )
 
-    if len(time_values) == 0:
-        raise ValueError("Time to expiry is missing.")
-
-    if not np.allclose(time_values, time_values[0]):
+    if len(time_values) != 1:
         raise ValueError(
-            "Expected one time-to-expiry value per chain."
+            "Expected exactly one time-to-expiry value per chain."
         )
 
     time_to_expiry = float(time_values[0])
+
+    if not np.isfinite(time_to_expiry) or time_to_expiry <= 0:
+        raise ValueError("Time to expiry must be finite and positive.")
 
     # Centering improves numerical stability because SPX strikes are large.
     center_strike = float(pairs["strike_price"].median())

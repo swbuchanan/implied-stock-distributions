@@ -3,7 +3,7 @@ from scipy.interpolate import CubicSpline, make_splrep
 
 
 from .pricing import implied_volatility_call, black_call_price, black_put_price
-
+from .forwards import estimate_forward_and_rate
 
 
 def compute_implied_vols(
@@ -203,11 +203,8 @@ def smooth_option_curve(
     ])
 
     return strike_grid, price_smooth, iv_of_strike
-
 def create_density_from_chain(
     chain,
-    forward,
-    risk_free_rate,
     option_type="call",
     n_grid=500,
     smoothing_factor=None,
@@ -215,9 +212,14 @@ def create_density_from_chain(
     """
     Construct a preliminary risk-neutral density from one option chain.
 
-    Negative values are retained because they provide a diagnostic of
-    smoothing or arbitrage problems.
+    This method involves clipping and normalization that don't respect economic laws.
+    It is not expected to work well; part of the research question is to understand
+    the difference, as measured by CRPS.
     """
+
+    estimates, _ = estimate_forward_and_rate(chain)
+    forward = estimates["forward"]
+    risk_free_rate = estimates["risk_free_rate"]
 
     quotes = chain.loc[
         chain["put_call"].eq(option_type)
@@ -264,16 +266,32 @@ def create_density_from_chain(
         strike_grid
     )
 
-    # Breeden-Litzenberger:
+    # Breeden-Litzenberger time:
     # f_Q(K) = exp(rT) * d^2C/dK^2
     density = (
         np.exp(risk_free_rate * time_to_expiry)
         * second_derivative
     )
 
-    return (
-        strike_grid,
-        price_smooth,
+    # don't try this at work
+    density = np.clip(density, 0.0, None)
+
+    # this is also not good
+    density_integral = np.trapezoid(
         density,
-        iv_of_strike,
+        strike_grid,
     )
+
+    if not np.isfinite(density_integral) or density_integral <= 0:
+        raise ValueError(
+            "Cannot normalize density: integral is non-positive or non-finite."
+        )
+
+    density = density / density_integral
+
+    return {
+        "strike_grid": strike_grid,
+        "price_smooth": price_smooth,
+        "density": density,
+        "iv_of_strike": iv_of_strike,
+    }
