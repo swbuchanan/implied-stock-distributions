@@ -247,9 +247,9 @@ def evaluate_risk_neutral_prediction_from_chain_iv_smoothing(
             "Expected exactly one expiration date."
         )
 
-    expiry_date = pd.Timestamp(
-        expiry_dates.iloc[0]
-    ).normalize()
+    # expiry_date = pd.Timestamp(
+    #     expiry_dates.iloc[0]
+    # ).normalize()
 
 
     estimates, _ = estimate_forward_and_rate(
