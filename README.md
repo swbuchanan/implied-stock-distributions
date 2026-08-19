@@ -123,18 +123,18 @@ project/
 │
 ├── README.md
 ├── data/
-│   ├── raw/
-│   └── processed/
+│   ├── raw/        # these directories are actually ignored
+│   └── processed/  # since I don't want to use github to share data
 │
 ├── implied_stock_distributions/
 │   └── ...   # core modeling code
 │
 ├── notebooks/
-│   ├── 01_processing.ipynb
-│   └── 02_project.ipynb
-│
+│   ├── 01_processing.ipynb     # data preprocessing
+│   └── 02_project.ipynb        # read this one if you like to open jupyter notebooks!
+│  
 └── reports/
-    └── ...
+    └── 02_project.html         # read this one if you don't like to open jupyter notebooks!
 ````
 
 ---
