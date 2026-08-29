@@ -185,6 +185,3 @@ Fengler — *Arbitrage-Free Smoothing of the Implied Volatility Surface*
 ## About
 
 This project explores how option prices encode full probability distributions of future market outcomes, and how these distributions compare to realized returns. This was originally a project that I completed as part of a quantitative finance course with The Erdős Institute, but has been significantly updated since then.
-
-```
-```
