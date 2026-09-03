@@ -1,5 +1,9 @@
 # SPX Option-Implied Probability Distributions
 
+⚠️ There are some problems with the analysis in this project as it currently stands. ⚠️
+Stay tuned for an updated version for which unfortunately the headline result does not hold... :(
+
+
 This project studies how probability distributions for future S&P 500 levels can be extracted from SPX option prices and how well they match realized outcomes.
 
 From historical option chains, the project:
