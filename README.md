@@ -1,187 +1,150 @@
-# SPX Option-Implied Probability Distributions
+# Implied stock distributions
 
-This project studies how probability distributions for future S&P 500 levels can be extracted from SPX option prices and how well they match realized outcomes.
+**What probability distribution for the future S&P 500 is embedded in SPX
+option prices, how well does it describe what actually happened, and does a
+simple pricing-kernel model close the gap?**
 
-From historical option chains, the project:
+Fourteen years of daily SPX option chains at maturities near 30, 60 and 90
+days. Forwards and discount factors come from put–call parity; densities come
+from the Breeden–Litzenberger relation applied to a shape-constrained
+(Fengler-style) call-price spline; forecasts are scored with the continuous
+ranked probability score against realised Cboe SET settlement values; and the
+risk-neutral densities are tilted toward physical ones under a CRRA pricing
+kernel.
 
-- estimates forward prices and discount rates via **put-call parity**,
-- recovers **risk-neutral densities** using the Breeden–Litzenberger relationship,
-- compares smoothing methods for noisy option data,
-- evaluates forecasts using the **Continuous Ranked Probability Score (CRPS)**, and
-- explores a simple transformation from risk-neutral to **physical probabilities** using a CRRA pricing kernel.
+```
+implied_stock_distributions/
+    config.py        paths, sample definition, every hyperparameter
+    pricing.py       Black's formula on a forward, and its inversion
+    forwards.py      forward and discount factor from put-call parity
+    fitting.py       the shape-constrained call-price spline
+    smoothing.py     the unconstrained implied-volatility baseline
+    selection.py     cross-validated choice of the roughness penalty
+    evaluation.py    CRPS, PIT, and the risk-neutral to physical tilt
+    benchmarks.py    reference forecasts to score against
+    stats.py         Diebold-Mariano, block bootstrap, calibration tests
+    data_access.py   locating, cataloguing and loading processed chains
+    plotting.py      the figures used in the notebook
+notebooks/
+    01_processing.ipynb   raw CSVs to monthly Parquet, plus settlement values
+    02_project.ipynb      the analysis
+tests/                    pytest suite, all against exact answers
+```
 
-The implementation is in Python, with analysis presented in Jupyter notebooks.
+## Results
 
-⭐ See `notebooks/02_project.ipynb` or `reports/02_project.html` for the main reports. ⭐
+Run `notebooks/02_project.ipynb`; its conclusion renders the headline numbers
+from the results it just computed, so they cannot drift away from the code.
+Fill in the table below from that output once the pipeline has been run
+end to end.
 
----
+|                              | Mean relative CRPS | Skill vs. lognormal benchmark |
+| ---------------------------- | ------------------ | ----------------------------- |
+| Shape-constrained            |                    |                               |
+| IV smoothing                 |                    |                               |
+| Lognormal at ATM implied vol |                    |                               |
 
-## Motivation
+## What is worth looking at
 
-Under the risk-neutral measure $Q$, a European call price is
+**The fit is a probability distribution by construction, and says so.** The
+boundary conditions `g(0) = 1`, `g'(0) = -1`, `g(x_max) = 0`, `g'(x_max) = 0`
+imply two exact identities: the fitted density integrates to one, and its
+mean equals the forward implied by put–call parity. Both are reported on
+every chain as correctness checks rather than imposed by renormalising
+afterwards.
 
-$$
-C(K,\tau) = e^{-r\tau}\mathbb{E}_Q[(S_T-K)^+].
-$$
+**The baseline is a fair one.** Constraints can only be shown to matter if
+the unconstrained comparison is given the same information. The
+implied-volatility baseline uses the same out-of-the-money quote selection,
+the same support (volatility extrapolated flat beyond the traded strikes),
+and a smoothing bound set to the expected weighted residual sum given each
+quote's estimated noise, rather than a number chosen by eye.
 
-Differentiating twice with respect to strike yields the Breeden–Litzenberger result:
+**The free parameter is selected, not chosen.** The roughness penalty is set
+by leave-out-every-fifth-strike cross-validation on out-of-sample pricing
+error, measured in half-spreads. Nothing about the realised outcome enters,
+so the selection is independent of the evaluation.
 
-$$
-f_Q(K) = e^{r\tau}\frac{\partial^2 C(K,\tau)}{\partial K^2},
-$$
+**The comparisons carry standard errors.** Each expiration is forecast on
+about twenty-one consecutive trading days, so several thousand chains are far
+fewer independent observations. Differences in mean score are tested with
+Diebold–Mariano using a Newey–West variance, and with a bootstrap over whole
+expiration months.
 
-which links option prices to the risk-neutral density.
+**Calibration is reported, not just accuracy.** The probability integral
+transform histogram shows *how* the risk-neutral densities fail against
+outcomes, which is the direct evidence that they price risk as well as
+describing it — and it is shown again after the CRRA tilt.
 
-In practice, this is challenging because option quotes are discrete and noisy, and second derivatives amplify irregularities. A key issue is therefore constructing smooth call-price curves that remain arbitrage-consistent.
+## Reproducing
 
----
+```bash
+pip install -e ".[notebooks,dev]"
+pytest
+```
 
-## Methodology
+The tests need no data: they build Black–Scholes chains with a known
+volatility and check that the pipeline recovers the analytic lognormal
+density, that CRPS matches its Gaussian closed form, and that the parity
+regression recovers the forward and rate it was given.
 
-### 1. Forward and discount rate estimation
+To run the analysis you need daily SPX option-chain CSVs at
+`data/raw/SPX/<year>/*.csv`, with columns `OptionKey`, `Symbol`, `DataDate`,
+`ExpirationDate`, `PutCall`, `StrikePrice`, `BidPrice`, `AskPrice`,
+`BidSize`, `AskSize`, `LastPrice`, `Volume`, `OpenInterest` and
+`UnderlyingPrice`. **The raw data are licensed and are not redistributed
+here.** Settlement values are downloaded from Cboe by the processing
+notebook and cached.
 
-Put-call parity implies
+Then run `notebooks/01_processing.ipynb` followed by
+`notebooks/02_project.ipynb`.
 
-$$
-C(K)-P(K)=D(F-K),
-$$
+Without the licensed data, `python -m tests.make_fixture` writes a small
+synthetic dataset in the same layout — Black–Scholes chains and a catalogue —
+which is enough to execute `02_project.ipynb` end to end and see every figure.
+The numbers it produces are meaningless; the point is that a reader can run
+the analysis without asking for the data.
 
-so if
+`cvxpy` with CLARABEL solves the convex program. If it is unavailable the
+package falls back to a small ADMM solver that needs only NumPy and SciPy —
+slower, and only intended to keep the pipeline and its tests runnable in a
+bare environment.
 
-$$
-C(K)-P(K)=a+bK,
-$$
+## Sample
 
-then
+`config.ANALYSIS_YEARS` is deliberately not contiguous: years whose vendor
+files carry too many indistinguishable duplicate option keys are excluded,
+and `config.EXCLUDED_YEARS` lists them. The coverage table at the end of
+`01_processing.ipynb` is the evidence. Excluding 2020 removes the most
+informative regime in the sample for tail behaviour, and recovering it would
+be worth more than any modelling change.
 
-$$
-D=-b, \qquad F=\frac{a}{D}, \qquad r=-\frac{\log D}{\tau}.
-$$
+Only standard monthly, AM-settled expirations are used, because those are the
+ones that settle against SET — the realised value everything is scored
+against. Time to expiry is measured to the Thursday close, since the
+settlement print comes from Friday's opening auction.
 
-This allows forward prices and discount rates to be inferred directly from option data.
+## Limitations
 
----
-
-### 2. Risk-neutral density estimation
-
-#### Implied-volatility smoothing
-
-Prices are converted to implied volatilities and smoothed as a function of log-forward-moneyness:
-
-$$
-k=\log\left(\frac{K}{F}\right).
-$$
-
-The smoothed surface is converted back to prices and differentiated to obtain a density. This is flexible but does not guarantee arbitrage-free prices.
-
-#### Shape-constrained smoothing (Fengler)
-
-A valid call-price curve must satisfy:
-
-$$
-\frac{\partial C}{\partial K}\leq 0, \qquad \frac{\partial^2 C}{\partial K^2}\geq 0.
-$$
-
-These conditions ensure that the implied density
-
-$$
-f_Q(K)\propto C''(K)
-$$
-
-is non-negative. The Fengler approach enforces these constraints directly while fitting a smooth curve, producing an arbitrage-consistent density.
-
----
-
-## Forecast evaluation
-
-Each implied distribution is compared to the realized SPX level using the CRPS:
-
-$$
-\int_{\mathbb{R}}\left(F_D(x)-\mathbf{1}_{x\geq y}\right)^2 dx.
-$$
-
-Lower values indicate better probabilistic forecasts. The analysis considers 30-, 60-, and 90-day horizons.
-
----
-
-## From risk-neutral to physical probabilities
-
-Risk-neutral densities are pricing objects, not real-world forecasts. To explore this gap, I use a CRRA-based transformation:
-
-$$
-f_P(s)\propto s^\gamma f_Q(s),
-$$
-
-where $\gamma$ controls the pricing-kernel adjustment. Different values of $\gamma$ are evaluated using CRPS.
-
----
-
-## Repository structure
-
-```text
-project/
-│
-├── README.md
-├── data/
-│   ├── raw/        # these directories are actually ignored
-│   └── processed/  # since I don't want to use github to share data
-│
-├── implied_stock_distributions/
-│   └── ...   # core modeling code
-│
-├── notebooks/
-│   ├── 01_processing.ipynb     # data preprocessing
-│   └── 02_project.ipynb        # read this one if you like to open jupyter notebooks!
-│  
-└── reports/
-    └── 02_project.html         # read this one if you don't like to open jupyter notebooks!
-````
-
----
-
-## Key tools
-
-* Python (NumPy, pandas, SciPy, Matplotlib)
-* Black–Scholes implied volatility
-* put-call parity
-* Breeden–Litzenberger density extraction
-* constrained spline fitting
-* CRPS for probabilistic evaluation
-
----
-
-## Key ideas
-
-* option-implied state prices
-* risk-neutral vs physical measures
-* volatility surface smoothing
-* static arbitrage constraints
-* probabilistic forecasting
-
----
-
-## Limitations and extensions
-
-Results depend on smoothing choices, grid resolution, and tail treatment. The CRRA transformation is also intentionally simple and not calibrated out-of-sample.
-
-Possible extensions include:
-
-* out-of-sample evaluation of $\gamma$
-* richer pricing-kernel models
-* joint strike–maturity surface fitting
-* improved tail modeling
-* comparison with ML-based forecasts
-
----
+- The tails beyond the traded strike range are extrapolation governed by the
+  roughness penalty, not by prices. The notebook reports how much mass lives
+  there; a proper tail model (Figlewski-style GEV tails) would separate the
+  smoothing question from the extrapolation question.
+- Only static strike arbitrage is removed. Fengler's backward pass across
+  maturities, which would make the three horizons mutually consistent, is not
+  implemented.
+- The CRRA parameter is estimated on the same observations used to measure
+  the improvement, so the Part 3 result is an in-sample fit. Estimating it on
+  a training period and evaluating out of sample is the obvious next step.
 
 ## References
 
-Breeden & Litzenberger (1978) — *Prices of State-Contingent Claims Implicit in Option Prices*
-
-Fengler — *Arbitrage-Free Smoothing of the Implied Volatility Surface*
-
----
-
-## About
-
-This project explores how option prices encode full probability distributions of future market outcomes, and how these distributions compare to realized returns. This was originally a project that I completed as part of a quantitative finance course with The Erdős Institute, but has been significantly updated since then.
+- Fengler, M. R. (2009). *Arbitrage-Free Smoothing of the Implied Volatility
+  Surface.* Quantitative Finance 9(4), 417–428.
+- Breeden, D. T. and Litzenberger, R. H. (1978). *Prices of State-Contingent
+  Claims Implicit in Option Prices.* Journal of Business 51(4), 621–651.
+- Gneiting, T. and Raftery, A. E. (2007). *Strictly Proper Scoring Rules,
+  Prediction, and Estimation.* JASA 102(477), 359–378.
+- Diebold, F. X. and Mariano, R. S. (1995). *Comparing Predictive Accuracy.*
+  Journal of Business & Economic Statistics 13(3), 253–263.
+- Taylor, S. J. *Asset Price Dynamics, Volatility, and Prediction*, chapter 16.
