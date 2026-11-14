@@ -21,8 +21,10 @@ the reproducibility alone:
   see what the penalty does in the extrapolated tails where no held-out
   strike exists; and
 * the realised outcomes are drawn from a physical measure that is a CRRA
-  tilt of the risk-neutral one at a *known* gamma, so Part 3's estimator
-  can be checked for bias instead of only reported.
+  tilt, at a *known* gamma, of the risk-neutral measure of one chain per
+  expiration. Only that chain's density is an exact tilt of the outcome
+  distribution, so a gamma estimate or PIT check pooled over every chain
+  is confounded by forecast misspecification.
 
 The model
 ---------
@@ -474,9 +476,12 @@ def generate_sample(market: SyntheticMarket | None = None):
                 models[key] = model
 
     # Outcomes are drawn ONCE per expiration, from the physical measure of
-    # the shortest-dated model observed for it -- which is what makes all
-    # three horizons of one expiration score against the same print, the
-    # dependence the whole inference section is about.
+    # the middle model observed for it (roughly a mid-window 60-day chain)
+    # -- which is what makes all three horizons of one expiration score
+    # against the same print, the dependence the whole inference section is
+    # about. Only that source chain's density is an exact tilt of the
+    # outcome distribution; every other chain of the expiration has its own
+    # forward, volatility and maturity.
     settlement_rows = []
     for expiration in expirations:
         candidates = [

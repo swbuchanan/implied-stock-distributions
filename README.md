@@ -28,14 +28,15 @@ How to read it:
 - The shape-constrained fit beats the implied-volatility baseline by about 1% of the score.
   The block bootstrap over expirations puts the difference at 0.00036 with a 95% interval of [0.00023, 0.00048], so it is small but not noise.
 - The CRRA tilt is not identified: the best risk aversion is about 1.6, but the 95% interval covers the whole grid from 0 to 5.
-  The synthetic demo shows the same thing with a known true value, so this is a property of CRPS as an estimator rather than of the data.
+  The synthetic demo's interval also covers the whole grid, which points to CRPS as the estimator rather than the data, though the demo's gamma check is not a clean known-truth test (see section 3.5 of the [review](docs/review-2026-11.md)).
 
 The conclusion cell of the notebook renders these numbers from the results it has just computed.
 
 ## Run it without any data
 
 The raw vendor chains are licensed and not redistributed here.
-A synthetic generator stands in for them: chains priced in closed form from a lognormal mixture, with SPX-like strike ladders, bid–ask spreads, tick rounding and stale quotes, and outcomes drawn from a CRRA tilt of the true density at a **known** gamma.
+A synthetic generator stands in for them: chains priced in closed form from a lognormal mixture, with SPX-like strike ladders, bid–ask spreads, tick rounding and stale quotes, and one outcome per expiration drawn from a CRRA tilt, at a known gamma, of one of that expiration's true densities.
+Only that one chain's density is an exact tilt of the outcome distribution, so the demo's gamma estimate and its calibration tests, pooled over every chain, are confounded by forecast misspecification.
 
 ```bash
 uv sync
@@ -44,7 +45,7 @@ uv run python -m implied_stock_distributions.demo
 ```
 
 The demo takes about half a minute.
-It runs the whole pipeline on synthetic chains, prints the scores, the inference and the recovered gamma against the true one, and writes `figures/synthetic_demo.png`:
+It runs the whole pipeline on synthetic chains, prints the scores, the inference and the estimated gamma against the one used to draw the outcomes, and writes `figures/synthetic_demo.png`:
 
 ![Synthetic demonstration](figures/synthetic_demo.png)
 

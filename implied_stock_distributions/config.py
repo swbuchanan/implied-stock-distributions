@@ -90,11 +90,10 @@ AM_SETTLEMENT_DAY_ADJUSTMENT = 1.0
 # The same calendar clock is used for discounting and for volatility. That
 # is a defensible default, but variance accumulates on trading days rather
 # than calendar days, and around Thanksgiving and Christmas the difference
-# moves thirty-day implied volatility by roughly a point. These support the
-# robustness check in the notebook; nothing in the pipeline uses them
-# unless it is asked to.
+# moves thirty-day implied volatility by roughly a point. This supports the
+# trading-clock robustness check in the processing notebook; nothing in the
+# pipeline uses it.
 TRADING_DAYS_PER_YEAR = 252.0
-BUSINESS_DAY_CALENDAR = "NYSE"
 
 # --------------------------------------------------------------------------
 # Forward and discount-factor estimation (put-call parity)

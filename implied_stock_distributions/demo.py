@@ -15,9 +15,16 @@ the real sample cannot give at all:
 * the recovered density is compared against the *true* one, in CRPS and in
   total variation, so the recovery error of the estimator is measured
   rather than assumed; and
-* the outcomes are drawn from a CRRA tilt of the true risk-neutral density
-  at a known gamma, so Part 3's estimator has something to be right or
-  wrong about.
+* the outcomes are drawn from a CRRA tilt, at a known gamma, of the true
+  risk-neutral density of one chain per expiration, so Part 3's estimator
+  has something to be right or wrong about.
+
+That last check is not clean. Only the chain each outcome was drawn from
+has a density that is an exact tilt of the outcome distribution; the other
+chains of the same expiration, at every horizon, are scored against a
+draw from a different chain's model. Gamma-hat and the PIT calibration,
+pooled across all of them, are therefore confounded by forecast
+misspecification.
 """
 
 from __future__ import annotations
@@ -237,7 +244,7 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
 
     print()
     print("=" * 68)
-    print("PART 3: RECOVERING A KNOWN GAMMA")
+    print("PART 3: GAMMA AGAINST THE ONE USED TO DRAW THE OUTCOMES")
     print("=" * 68)
     gamma_grid = np.linspace(0.0, 5.0, 26)
     matrix = relative_crps_curve(gamma_grid, cached)
@@ -253,6 +260,8 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
           f"[{interval['one_se_lower']:.2f}, {interval['one_se_upper']:.2f}]")
     print("  (The interval is built from the PAIRED difference")
     print("   L(gamma) - L(gamma-hat), not the standard error of the level.)")
+    print("  (Only one chain per expiration is an exact tilt of its outcome's")
+    print("   distribution, so this is not a clean recovery test.)")
 
     if figure_path is not None:
         _figure(scores, gamma_grid, interval, truth, Path(figure_path))
