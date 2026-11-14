@@ -5,14 +5,8 @@ than fits in memory at once. The catalogue records which chains live in
 which file so that an analysis can iterate over chains while holding only
 one month at a time.
 
-Paths in the catalogue are stored relative to the project root. Storing
-absolute paths, as an earlier version did, bakes one machine's home
-directory into a committed artefact and makes the catalogue useless in any
-other clone.
-
-Unchanged from v3 apart from this note and ``discover_data_files`` no
-longer restricting to ``ANALYSIS_YEARS`` when a synthetic dataset is in
-place -- see ``synthetic.write_synthetic_dataset``.
+Paths in the catalogue are stored relative to the project root, so that a
+catalogue built on one machine still works in another clone.
 """
 
 from __future__ import annotations
@@ -33,6 +27,7 @@ from .config import (
 __all__ = [
     "discover_data_files",
     "build_chain_catalog",
+    "catalog_path",
     "load_chain_catalog",
     "resolve_parquet_path",
     "load_chain",
@@ -60,8 +55,9 @@ def discover_data_files(
     return files_by_year, files
 
 
-def _as_relative(path: Path) -> str:
-    """Store paths relative to the project root when possible."""
+def catalog_path(path: Path) -> str:
+    """A Parquet path as the catalogue stores it: relative to the project
+    root when the file is inside it, absolute otherwise."""
     path = Path(path)
     try:
         return str(path.resolve().relative_to(PROJECT_ROOT))
@@ -81,7 +77,7 @@ def build_chain_catalog() -> pd.DataFrame:
 
     for path in data_files:
         chains = pd.read_parquet(path, columns=CHAIN_COLUMNS).drop_duplicates()
-        chains["parquet_path"] = _as_relative(path)
+        chains["parquet_path"] = catalog_path(path)
         parts.append(chains)
 
     return (

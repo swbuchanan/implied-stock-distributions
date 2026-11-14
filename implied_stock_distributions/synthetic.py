@@ -6,7 +6,7 @@ either. This module removes that: it generates option chains from a model
 whose density, CDF and option prices are all available in closed form, in
 the same shape the processing notebook produces, so that
 
-    python -m implied_stock_distributions.synthetic --out data
+    python -m implied_stock_distributions.synthetic
 
 writes a complete synthetic dataset that ``data_access`` loads unchanged
 and the analysis notebook runs against end to end in about a minute.
@@ -66,9 +66,11 @@ from scipy import stats
 
 from .config import (
     AM_SETTLEMENT_DAY_ADJUSTMENT,
+    DATA_DIR,
     DAY_COUNT_DAYS_PER_YEAR,
     TARGET_DTES,
 )
+from .data_access import catalog_path
 
 __all__ = [
     "MixtureModel",
@@ -141,7 +143,7 @@ class MixtureModel:
         positive = levels > 0
 
         for weight, mean_log, scale in zip(
-            self.weights, self.log_means, self.log_scales
+            self.weights, self.log_means, self.log_scales, strict=True
         ):
             out[positive] += weight * stats.lognorm.pdf(
                 levels[positive], s=scale, scale=np.exp(mean_log)
@@ -155,7 +157,7 @@ class MixtureModel:
         positive = levels > 0
 
         for weight, mean_log, scale in zip(
-            self.weights, self.log_means, self.log_scales
+            self.weights, self.log_means, self.log_scales, strict=True
         ):
             out[positive] += weight * stats.lognorm.cdf(
                 levels[positive], s=scale, scale=np.exp(mean_log)
@@ -170,7 +172,7 @@ class MixtureModel:
         total = np.zeros_like(strike)
 
         for weight, component_forward, scale in zip(
-            self.weights, self.component_forwards, self.log_scales
+            self.weights, self.component_forwards, self.log_scales, strict=True
         ):
             total += weight * black_call_price(
                 component_forward,
@@ -189,7 +191,7 @@ class MixtureModel:
             self.forward - strike
         )
 
-    def tilted(self, gamma: float) -> "MixtureModel":
+    def tilted(self, gamma: float) -> MixtureModel:
         """The CRRA-tilted mixture: still a mixture, in closed form.
 
         ``s^gamma LogNormal(m, v)`` is ``LogNormal(m + gamma v, v)`` up to a
@@ -534,11 +536,10 @@ def write_synthetic_dataset(
         path = year_dir / f"spx_options_{int(year)}_{int(month):02d}.parquet"
         group.to_parquet(path, index=False)
 
-        relative = path.relative_to(root.parent) if root.parent in path.parents else path
         keys = group[
             ["data_date", "expiration_date", "target_dte_days"]
         ].drop_duplicates()
-        keys["parquet_path"] = str(relative)
+        keys["parquet_path"] = catalog_path(path)
         catalog_rows.append(keys)
 
     catalog = pd.concat(catalog_rows, ignore_index=True).sort_values(
@@ -574,7 +575,8 @@ def _main(argv=None):
         description="Generate a synthetic SPX dataset the pipeline can run on."
     )
     parser.add_argument(
-        "--out", default="data", help="Data directory to write under."
+        "--out", default=str(DATA_DIR),
+        help="Data directory to write under (default: the project's data/).",
     )
     parser.add_argument(
         "--months", type=int, default=36, help="Number of expirations."

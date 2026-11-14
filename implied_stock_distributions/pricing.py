@@ -5,8 +5,6 @@ inferred from put-call parity already carries the expected dividends and
 financing costs of the index, so no separate dividend model is needed.
 
 All functions accept scalars or arrays and broadcast.
-
-Unchanged from v3 apart from this note.
 """
 
 from __future__ import annotations

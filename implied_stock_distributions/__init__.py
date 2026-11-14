@@ -9,11 +9,13 @@ Modules
 ``smoothing``   the unconstrained implied-volatility baseline
 ``selection``   cross-validated choice of the roughness penalty
 ``evaluation``  CRPS, PIT, and the CRRA tilt from risk-neutral to physical
+``pipeline``    one chain end to end: both fits, a benchmark and the scores
 ``benchmarks``  reference forecasts to score against
 ``stats``       Diebold-Mariano, block bootstrap, calibration tests
 ``validation``  the pipeline's outputs against published external series
 ``synthetic``   synthetic chains with a known true density, for the demo
                 and the test suite
+``demo``        the whole pipeline on synthetic data, with no vendor files
 ``data_access`` locating, cataloguing and loading processed chains
 ``plotting``    the figures used in the analysis notebook
 """
@@ -32,8 +34,6 @@ from .evaluation import (
     crps_from_density_grid,
     crps_location_sensitivity,
     distribution_moments,
-    evaluate_chain_constrained,
-    evaluate_chain_iv_smoothing,
     gamma_plausible_interval,
     implied_equity_risk_premium,
     mean_relative_crps_for_gamma,
@@ -52,6 +52,7 @@ from .fitting import (
     select_call_equivalent_quotes,
 )
 from .forwards import estimate_forward_and_rate, quality_failures
+from .pipeline import score_chain
 from .pricing import (
     black_call_price,
     black_put_price,
@@ -94,8 +95,7 @@ __all__ = [
     "probability_integral_transform",
     "distribution_moments",
     "recentre_on_forward",
-    "evaluate_chain_constrained",
-    "evaluate_chain_iv_smoothing",
+    "score_chain",
     "physical_density_from_rn_grid",
     "mean_relative_crps_for_gamma",
     "relative_crps_for_gamma",
@@ -116,4 +116,3 @@ __all__ = [
     "skill_score",
 ]
 
-__version__ = "0.3.0"

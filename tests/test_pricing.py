@@ -84,7 +84,9 @@ def test_implied_volatility_rejects_impossible_prices():
     discount = np.exp(-RATE * TIME)
 
     below_intrinsic = 0.9 * discount * (FORWARD - 3600.0)
-    assert np.isnan(implied_volatility_call(below_intrinsic, FORWARD, 3600.0, TIME, RATE))
+    assert np.isnan(
+        implied_volatility_call(below_intrinsic, FORWARD, 3600.0, TIME, RATE)
+    )
 
     above_forward = 1.01 * discount * FORWARD
     assert np.isnan(implied_volatility_call(above_forward, FORWARD, 3600.0, TIME, RATE))

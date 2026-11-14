@@ -50,6 +50,8 @@ from .config import (
     VIX_BUCKET_EDGES,
     VIX_BUCKET_LABELS,
 )
+from .errors import ChainQualityError
+from .evaluation import distribution_moments
 
 __all__ = [
     "fetch_fred_series",
@@ -309,7 +311,7 @@ def validate_dividend_yield(
     the implied yield absorbs the index's borrow cost, so it sits slightly
     above the pure dividend yield when securities lending is expensive.
     Tracking to within a few tens of basis points, with the right shape
-    through 2008 and 2020, is what confirms the regression.
+    through the 2008-09 dividend cuts, is what would confirm the regression.
     """
     dividend_yield = (
         dividend_yield if dividend_yield is not None else fetch_dividend_yield()
@@ -341,7 +343,7 @@ def validate_dividend_yield(
 # Risk-neutral skewness against Cboe SKEW
 # --------------------------------------------------------------------------
 
-def risk_neutral_skewness(strike_grid, density, forward=None) -> float:
+def risk_neutral_skewness(strike_grid, density, support=None) -> float:
     """Skewness of log returns under a tabulated risk-neutral density.
 
     This is the quantity Cboe's SKEW index is a linear function of. Cboe
@@ -349,36 +351,17 @@ def risk_neutral_skewness(strike_grid, density, forward=None) -> float:
     Madan, 2003); computing it here from the fitted density instead means
     agreement between the two is a real test of the recovered *shape*,
     since nothing in the two calculations is shared.
+
+    Pass the traded strike range as ``support``. Cboe uses only traded
+    strikes, and on the full support the third log moment is dominated by
+    whatever small amount of mass the fit extrapolates far below the lowest
+    strike (see ``evaluation.distribution_moments``).
     """
-    strike_grid = np.asarray(strike_grid, dtype=float)
-    density = np.asarray(density, dtype=float)
-
-    positive = strike_grid > 0
-    levels = strike_grid[positive]
-    weights = density[positive]
-
-    mass = float(np.trapezoid(weights, levels))
-    if not np.isfinite(mass) or mass <= 0:
+    try:
+        moments = distribution_moments(strike_grid, density, support=support)
+    except ChainQualityError:
         return float("nan")
-
-    reference = float(forward) if forward else float(
-        np.trapezoid(levels * weights, levels) / mass
-    )
-    log_returns = np.log(levels / reference)
-
-    def moment(order, centre=0.0):
-        return float(
-            np.trapezoid((log_returns - centre) ** order * weights, levels) / mass
-        )
-
-    mean = moment(1)
-    variance = moment(2, mean)
-    third = moment(3, mean)
-
-    if variance <= 0:
-        return float("nan")
-
-    return third / variance**1.5
+    return moments["log_skewness"]
 
 
 def skew_index_equivalent(skewness) -> np.ndarray:

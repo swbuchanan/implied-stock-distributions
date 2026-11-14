@@ -7,6 +7,7 @@ project is scored through the same function.
 
 import numpy as np
 import pytest
+from scipy.stats import norm
 
 from implied_stock_distributions.benchmarks import gaussian_crps
 from implied_stock_distributions.errors import ChainQualityError
@@ -18,7 +19,6 @@ from implied_stock_distributions.evaluation import (
     physical_density_from_rn_grid,
     probability_integral_transform,
 )
-from scipy.stats import norm
 
 MEAN = 4500.0
 SIGMA = 250.0
@@ -37,10 +37,18 @@ def test_crps_matches_the_gaussian_closed_form(realized):
     assert numeric == pytest.approx(exact, rel=2e-3)
 
 
-def test_crps_is_zero_for_a_point_mass_on_the_outcome():
-    grid = np.linspace(4000.0, 5000.0, 100001)
-    cdf = (grid >= 4500.0).astype(float)
-    assert crps_from_cdf(grid, cdf, 4500.0) == pytest.approx(0.0, abs=1e-6)
+def test_crps_of_a_point_mass_on_the_outcome_is_one_cell_of_ramp():
+    """The score integrates the piecewise-linear interpolant of the CDF.
+
+    Tabulated on a grid of spacing ``h``, a step at the outcome becomes a
+    ramp across the cell just below it, so the exact score of that
+    interpolant is ``h / 3`` -- and it vanishes as the grid is refined.
+    """
+    for points in (1001, 100001):
+        grid = np.linspace(4000.0, 5000.0, points)
+        cdf = (grid >= 4500.0).astype(float)
+        h = grid[1] - grid[0]
+        assert crps_from_cdf(grid, cdf, 4500.0) == pytest.approx(h / 3, rel=1e-9)
 
 
 def test_crps_handles_an_outcome_outside_the_support():
@@ -192,11 +200,34 @@ def test_tilted_distribution_round_trips_through_the_scorers():
     assert relative_crps_for_gamma(2.0, [observation]).shape == (1,)
     assert 0.0 <= pit_for_gamma(2.0, [observation])[0] <= 1.0
 
-    # Confining the tilt to the traded range must change the answer, and
-    # must not change it when the range covers the whole grid.
-    restricted = relative_crps_for_gamma(2.0, [observation], tilt_range="traded")
+    # A range that already holds all the mass must not change the answer;
+    # a narrow one must.
+    covering = relative_crps_for_gamma(2.0, [observation], tilt_range="traded")
     full = relative_crps_for_gamma(2.0, [observation])
-    assert restricted[0] != pytest.approx(full[0], rel=1e-9)
+    assert covering[0] == pytest.approx(full[0], rel=1e-9)
+
+    narrow = relative_crps_for_gamma(2.0, [observation], tilt_range=(4400.0, 4600.0))
+    assert narrow[0] != pytest.approx(full[0], rel=1e-6)
+
+
+def test_restricted_tilt_is_continuous():
+    """Outside the range the kernel holds its boundary value; it never jumps."""
+    grid = np.linspace(1.0, 9000.0, 9001)
+    density = norm.pdf(grid, MEAN, SIGMA)
+    density = density / np.trapezoid(density, grid)
+
+    low, high = 4300.0, 4700.0
+    tilted = physical_density_from_rn_grid(grid, density, 4.0, tilt_range=(low, high))
+    ratio = tilted / density
+
+    # The likelihood ratio is constant below the range, constant above it,
+    # rises through it, and meets both constants without a jump.
+    below, above = ratio[grid < low], ratio[grid > high]
+    assert np.allclose(below, below[0]) and np.allclose(above, above[0])
+    inside = ratio[(grid >= low) & (grid <= high)]
+    assert np.all(np.diff(inside) > 0)
+    assert inside[0] == pytest.approx(below[0], rel=1e-3)
+    assert inside[-1] == pytest.approx(above[0], rel=1e-3)
 
 
 def test_cdf_from_density_rejects_negative_mass():

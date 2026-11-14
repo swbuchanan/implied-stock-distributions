@@ -24,7 +24,7 @@ Three details matter for accuracy:
   gate: the denominator is the spread of the call-put difference across
   strikes, which is enormous, so a fit can clear it while missing the
   quoted market at a quarter of the strikes. The share of pairs whose
-  parity residual exceeds the average half-spread is scale-free, is the
+  parity residual exceeds the sum of the call and put half-spreads is scale-free, is the
   number an options market maker would ask for, and was already being
   computed in the notebook's diagnostic sweep and then discarded.
 
@@ -284,13 +284,15 @@ def estimate_forward_and_rate(
     pairs["parity_residual"] = residuals
 
     # The scale-free measure of fit: how often the line misses the market
-    # by more than the market's own quoted uncertainty.
-    average_half_spread = (
-        (pairs["call_spread"].to_numpy(dtype=float)
-         + pairs["put_spread"].to_numpy(dtype=float)) / 2.0
-    )
+    # by more than the market's own quoted uncertainty. Each mid is known to
+    # within its half-spread, so call-minus-put is known to within the SUM
+    # of the two half-spreads.
+    parity_tolerance = (
+        pairs["call_spread"].to_numpy(dtype=float)
+        + pairs["put_spread"].to_numpy(dtype=float)
+    ) / 2.0
     with np.errstate(invalid="ignore"):
-        outside = np.abs(residuals) > average_half_spread
+        outside = np.abs(residuals) > parity_tolerance
     fraction_outside_spreads = float(np.mean(outside)) if len(residuals) else np.nan
 
     estimates = {

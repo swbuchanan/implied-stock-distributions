@@ -79,7 +79,6 @@ def cross_validate_chain(
     penalties=ROUGHNESS_PENALTY_GRID,
     stride: int = CV_HOLDOUT_STRIDE,
     estimates: dict | None = None,
-    solver: str = "auto",
     rescale_penalty: bool = True,
     **fit_kwargs,
 ) -> dict:
@@ -147,7 +146,6 @@ def cross_validate_chain(
                     roughness_penalty=fold_penalty,
                     quotes=training,
                     knot_strikes=all_strikes,
-                    solver=solver,
                     **fit_kwargs,
                 )
             except ChainError:
@@ -180,7 +178,6 @@ def select_roughness_penalty(
     chains,
     penalties=ROUGHNESS_PENALTY_GRID,
     stride: int = CV_HOLDOUT_STRIDE,
-    solver: str = "auto",
     progress_every: int | None = 50,
     one_standard_error: bool = True,
     **fit_kwargs,
@@ -220,7 +217,6 @@ def select_roughness_penalty(
                 chain,
                 penalties=penalties,
                 stride=stride,
-                solver=solver,
                 **fit_kwargs,
             )
         except (ChainError, ValueError):

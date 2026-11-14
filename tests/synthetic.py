@@ -36,7 +36,10 @@ def synthetic_chain(
     ----------
     spread : float
         Bid-ask width in index points, applied symmetrically about the
-        theoretical price.
+        mid-price. It is widened to at least four times ``noise``, so the
+        quotes stay consistent with their own spreads -- a market whose mids
+        wobble by more than its quoted width would (rightly) fail the parity
+        quality gate in ``forwards``.
     noise : float
         Standard deviation of the perturbation added to each mid-price, in
         index points. Zero gives an exactly arbitrage-free chain.
@@ -45,6 +48,7 @@ def synthetic_chain(
         value gives the usual equity-index shape.
     """
     time_to_expiry = days_to_expiry / 365.0
+    spread = max(spread, 4.0 * noise)
     discount_factor = float(np.exp(-rate * time_to_expiry))
     generator = np.random.default_rng(seed)
 

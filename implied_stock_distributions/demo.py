@@ -29,24 +29,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .benchmarks import lognormal_forecast
 from .errors import ChainError, failure_reason
-from .evaluation import (
-    cdf_from_density,
-    common_strike_grid,
-    crps_from_cdf,
-    evaluate_distribution,
-    gamma_plausible_interval,
-    recentre_on_forward,
-    relative_crps_curve,
-)
-from .fitting import (
-    construct_risk_neutral_distribution_from_spline,
-    fit_shape_constrained_call_spline,
-    select_call_equivalent_quotes,
-)
-from .forwards import estimate_forward_and_rate
-from .smoothing import create_density_from_chain
+from .evaluation import crps_from_cdf, gamma_plausible_interval, relative_crps_curve
+from .pipeline import score_chain
 from .stats import (
     block_bootstrap_mean,
     diebold_mariano,
@@ -61,7 +46,7 @@ from .validation import risk_neutral_skewness
 
 
 def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=True):
-    """Fit and score every synthetic chain, both methods plus benchmarks."""
+    """Score every synthetic chain, and compare each fit with the truth."""
     rows, cached, failures = [], [], []
     started = time.time()
 
@@ -77,95 +62,29 @@ def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=Tr
             continue
 
         try:
-            estimates, _ = estimate_forward_and_rate(chain)
-            forward = estimates["forward"]
-            quotes = select_call_equivalent_quotes(
-                chain, forward, estimates["discount_factor"]
-            )
-
-            fit = fit_shape_constrained_call_spline(
-                chain,
-                forward=forward,
-                risk_free_rate=estimates["risk_free_rate"],
-                roughness_penalty=roughness_penalty,
-                quotes=quotes,
-            )
-
-            # One grid for every forecast scored on this chain.
-            grid = common_strike_grid(
-                forward,
-                extra_points=np.concatenate([
-                    fit["breakpoints"] * forward,
-                    quotes["strike_price"].to_numpy(dtype=float),
-                ]),
-            )
-
-            constrained = construct_risk_neutral_distribution_from_spline(
-                fit, strike_grid=grid
-            )
-            iv_result = create_density_from_chain(
-                chain,
-                forward=forward,
-                risk_free_rate=estimates["risk_free_rate"],
-                quotes=quotes,
-                strike_grid=grid,
-            )
-
-            recentred_grid, recentred_density = recentre_on_forward(
-                iv_result["strike_grid"], iv_result["density"], forward
-            )
-            recentred_grid, recentred_cdf = cdf_from_density(
-                recentred_grid, recentred_density
-            )
-
-            atm = float(
-                np.asarray(iv_result["iv_of_strike"](forward)).ravel()[0]
-            )
-            benchmark = lognormal_forecast(
-                forward, atm, estimates["time_to_expiry"], realized,
-                strike_grid=grid,
-            )
-
-            # The truth, through the same quadrature. Each method returns a
-            # grid that may differ from the shared one by its endpoints, so
-            # the truth is tabulated on each method's own grid; now that
-            # the quadrature is exact the score does not care which.
-            model = models[key]
-            constrained_grid = constrained["strike_grid"]
-            true_cdf = model.cdf(constrained_grid)
-            true_cdf = (true_cdf - true_cdf[0]) / (true_cdf[-1] - true_cdf[0])
-
+            result = score_chain(chain, realized, roughness_penalty)
         except (ChainError, ValueError) as exc:
             failures.append({"key": key, "reason": failure_reason(exc)})
             continue
 
-        constrained_score = evaluate_distribution(
-            constrained["strike_grid"], constrained["cdf"], realized, forward,
-            density=constrained["density"],
-        )
-        iv_score = evaluate_distribution(
-            iv_result["strike_grid"], iv_result["cdf"], realized, forward,
-            density=iv_result["density"],
-        )
+        # The truth, through the same quadrature and on the same grid. This
+        # is the comparison only a synthetic study can make.
+        model = models[key]
+        constrained, iv_result = result["constrained"], result["iv"]
+        forward = result["scores"]["forward"]
+        grid = constrained["strike_grid"]
 
-        # Recovery error against the true density: the thing only a
-        # synthetic study can measure.
-        def l1_against_truth(method_grid, method_density):
+        true_cdf = model.cdf(grid)
+        true_cdf = (true_cdf - true_cdf[0]) / (true_cdf[-1] - true_cdf[0])
+
+        def true_density_on(method_grid, model=model):
             truth = model.density(method_grid)
-            truth = truth / np.trapezoid(truth, method_grid)
-            return float(
-                np.trapezoid(np.abs(method_density - truth), method_grid)
-            )
+            return truth / np.trapezoid(truth, method_grid)
 
-        l1_constrained = l1_against_truth(
-            constrained_grid, constrained["density"]
-        )
-        l1_iv = l1_against_truth(
-            iv_result["strike_grid"], iv_result["density"]
-        )
-
-        true_density = model.density(constrained_grid)
-        true_density = true_density / np.trapezoid(true_density, constrained_grid)
+        def l1_against_truth(method_grid, method_density):
+            return float(np.trapezoid(
+                np.abs(method_density - true_density_on(method_grid)), method_grid
+            ))
 
         rows.append({
             "data_date": data_date,
@@ -173,47 +92,23 @@ def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=Tr
             "target_dte_days": int(target),
             "actual_dte": (expiration - data_date).days,
             "year": data_date.year,
-            "forward": forward,
-            "realized_value": realized,
+            **result["scores"],
             "true_forward": model.forward,
-
-            "relative_crps_constrained": constrained_score["relative_crps"],
-            "relative_crps_iv": iv_score["relative_crps"],
-            "relative_crps_iv_recentred": (
-                crps_from_cdf(recentred_grid, recentred_cdf, realized) / forward
+            "relative_crps_truth": crps_from_cdf(grid, true_cdf, realized) / forward,
+            "l1_error_constrained": l1_against_truth(grid, constrained["density"]),
+            "l1_error_iv": l1_against_truth(
+                iv_result["strike_grid"], iv_result["density"]
             ),
-            "relative_crps_lognormal": benchmark["relative_crps"],
-            "relative_crps_truth": (
-                crps_from_cdf(constrained_grid, true_cdf, realized) / forward
+            "true_risk_neutral_skewness": risk_neutral_skewness(
+                grid, true_density_on(grid), support=result["fit"]["strike_bounds"]
             ),
-
-            "pit_constrained": constrained_score["pit"],
-            "pit_iv": iv_score["pit"],
-            "pit_lognormal": benchmark["pit"],
-
-            "mean_over_forward_iv": iv_score["mean_over_forward"],
-            "negative_mass_clipped": iv_result["negative_mass_clipped"],
-            "n_smile_knots": iv_result["n_smile_knots"],
-            "mass_below_traded": fit["mass_below_traded"],
-            "mass_above_traded": fit["mass_above_traded"],
-
-            "l1_error_constrained": l1_constrained,
-            "l1_error_iv": l1_iv,
-            "skewness_constrained": risk_neutral_skewness(
-                constrained_grid, constrained["density"], forward
-            ),
-            "skewness_true": risk_neutral_skewness(constrained_grid, true_density, model.forward),
         })
 
         cached.append({
             "data_date": data_date,
             "expiration_date": expiration,
             "target_dte": int(target),
-            "realized_value": float(realized),
-            "forward": float(forward),
-            "traded_range": fit["strike_bounds"],
-            "strike_grid": constrained["strike_grid"],
-            "fQ": constrained["density"],
+            **result["cached"],
         })
 
     return pd.DataFrame(rows), cached, pd.DataFrame(failures)
@@ -279,8 +174,8 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
               f"skill vs lognormal {skill:+.4f}")
 
     print()
-    print("  Location versus shape (issue 2.2):")
-    displacement = scores["mean_over_forward_iv"] - 1.0
+    print("  Location versus shape:")
+    displacement = scores["iv_mean_over_forward"] - 1.0
     gap_raw = (scores["relative_crps_iv"]
                - scores["relative_crps_constrained"]).mean()
     gap_recentred = (scores["relative_crps_iv_recentred"]
@@ -289,9 +184,6 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
           f"(median {1 + displacement.median():.5f})")
     print(f"    IV minus constrained, raw:       {gap_raw:+.5f}")
     print(f"    IV minus constrained, recentred: {gap_recentred:+.5f}")
-    if abs(gap_raw) > 0:
-        print(f"    Share of the gap that is location: "
-              f"{1 - gap_recentred / gap_raw:+.1%}")
 
     print()
     print("=" * 68)
@@ -319,7 +211,7 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
 
     print()
     print("=" * 68)
-    print("CALIBRATION  (one observation per expiration -- issue 2.4)")
+    print("CALIBRATION  (one observation per expiration)")
     print("=" * 68)
     for horizon in sorted(scores["target_dte_days"].unique()):
         panel = one_per_expiration(scores, horizon=int(horizon))
@@ -339,9 +231,9 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
     print(f"  L1 distance, IV smoothing:      "
           f"{scores['l1_error_iv'].mean():.4f} "
           f"(median {scores['l1_error_iv'].median():.4f})")
-    print(f"  Risk-neutral skewness: fitted "
-          f"{scores['skewness_constrained'].mean():+.3f} vs true "
-          f"{scores['skewness_true'].mean():+.3f}")
+    print(f"  Risk-neutral log skewness on the traded strikes: fitted "
+          f"{scores['risk_neutral_skewness'].mean():+.3f} vs true "
+          f"{scores['true_risk_neutral_skewness'].mean():+.3f}")
 
     print()
     print("=" * 68)
@@ -359,7 +251,7 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
           f"[{interval['plausible_lower']:.2f}, {interval['plausible_upper']:.2f}]")
     print(f"  One-standard-error interval:          "
           f"[{interval['one_se_lower']:.2f}, {interval['one_se_upper']:.2f}]")
-    print("  (Issue 2.5: this interval is built from the PAIRED difference")
+    print("  (The interval is built from the PAIRED difference")
     print("   L(gamma) - L(gamma-hat), not the standard error of the level.)")
 
     if figure_path is not None:
@@ -409,7 +301,8 @@ def _figure(scores, gamma_grid, interval, truth, path: Path):
 
     axes[2].plot(gamma_grid, interval["curve"], color=PALETTE["constrained"])
     axes[2].axvline(interval["gamma_hat"], color=PALETTE["iv"],
-                    linestyle="--", label=fr"$\hat\gamma$ = {interval['gamma_hat']:.2f}")
+                    linestyle="--",
+                    label=fr"$\hat\gamma$ = {interval['gamma_hat']:.2f}")
     axes[2].axvline(truth["gamma"], color=PALETTE["violation"],
                     linestyle=":", label=fr"true $\gamma$ = {truth['gamma']:.2f}")
     axes[2].axvspan(interval["plausible_lower"], interval["plausible_upper"],

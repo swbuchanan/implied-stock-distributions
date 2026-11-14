@@ -50,12 +50,6 @@ import numpy as np
 
 from .config import CRPS_MASS_TOLERANCE, DENSITY_GRID_POINTS, UPPER_SUPPORT_MULTIPLE
 from .errors import ChainQualityError
-from .fitting import (
-    construct_risk_neutral_distribution_from_spline,
-    fit_shape_constrained_call_spline,
-)
-from .forwards import estimate_forward_and_rate
-from .smoothing import create_density_from_chain
 
 __all__ = [
     "cdf_from_density",
@@ -64,8 +58,6 @@ __all__ = [
     "crps_from_density_grid",
     "probability_integral_transform",
     "evaluate_distribution",
-    "evaluate_chain_constrained",
-    "evaluate_chain_iv_smoothing",
     "distribution_moments",
     "recentre_on_forward",
     "physical_density_from_rn_grid",
@@ -256,17 +248,34 @@ def probability_integral_transform(strike_grid, cdf, realized_value):
     integrates, so the two diagnostics describe one distribution.
     """
     strike_grid, cdf = _clean_grid(strike_grid, cdf)
-    return float(np.interp(float(realized_value), strike_grid, cdf, left=0.0, right=1.0))
+    return float(
+        np.interp(float(realized_value), strike_grid, cdf, left=0.0, right=1.0)
+    )
 
 
-def distribution_moments(strike_grid, density):
+def distribution_moments(strike_grid, density, support=None):
     """Mean, standard deviation and log-return moments of a tabulated density.
 
     The log-return moments are taken under the forecast distribution of
     ``log(S_T)``, which is the object the CRRA tilt acts on additively and
     the object Cboe's SKEW index describes.
+
+    ``support`` restricts every moment to ``low <= S_T <= high`` (the density
+    is renormalised there). Pass the traded strike range when the higher
+    log moments matter: ``log(S_T / F)`` is about -2 at ``0.1 F``, so one per
+    cent of extrapolated mass far below the lowest strike is enough to move
+    the log-skewness by several units -- the tail model, not the prices,
+    would then decide the answer. Cboe's SKEW is likewise computed from the
+    traded strikes only.
     """
     strike_grid, density = _clean_grid(strike_grid, density)
+
+    if support is not None:
+        low, high = support
+        inside = (strike_grid >= low) & (strike_grid <= high)
+        if inside.sum() < 2:
+            raise ChainQualityError("The support holds fewer than two grid points.")
+        strike_grid, density = strike_grid[inside], density[inside]
 
     mass = float(np.trapezoid(density, strike_grid))
     if not np.isfinite(mass) or mass <= 0:
@@ -379,102 +388,6 @@ def evaluate_distribution(strike_grid, cdf, realized_value, forward, density=Non
 
 
 # --------------------------------------------------------------------------
-# Per-chain entry points
-# --------------------------------------------------------------------------
-
-def evaluate_chain_constrained(
-    chain,
-    realized_value,
-    estimates=None,
-    roughness_penalty=None,
-    strike_grid=None,
-    **fit_kwargs,
-):
-    """Fit the shape-constrained density for one chain and score it.
-
-    ``estimates`` may be passed in to avoid repeating the parity fit; every
-    caller in the pipeline does so, because the same estimate is needed by
-    the baseline as well. ``strike_grid`` forces the tabulation onto a
-    shared grid, which is what makes the score comparable across methods.
-    """
-    if estimates is None:
-        estimates, _ = estimate_forward_and_rate(chain)
-
-    if roughness_penalty is not None:
-        fit_kwargs["roughness_penalty"] = roughness_penalty
-
-    fit = fit_shape_constrained_call_spline(
-        chain,
-        forward=estimates["forward"],
-        risk_free_rate=estimates["risk_free_rate"],
-        **fit_kwargs,
-    )
-
-    distribution = construct_risk_neutral_distribution_from_spline(
-        fit, strike_grid=strike_grid
-    )
-
-    result = evaluate_distribution(
-        distribution["strike_grid"],
-        distribution["cdf"],
-        realized_value,
-        estimates["forward"],
-        density=distribution["density"],
-    )
-
-    result.update(
-        strike_grid=distribution["strike_grid"],
-        density=distribution["density"],
-        cdf=distribution["cdf"],
-        risk_free_rate=estimates["risk_free_rate"],
-        mass=distribution["mass"],
-        mass_below_traded=fit["mass_below_traded"],
-        mass_above_traded=fit["mass_above_traded"],
-        solver_status=fit["solver_status"],
-        solver_inaccurate=fit["solver_inaccurate"],
-    )
-    return result
-
-
-def evaluate_chain_iv_smoothing(
-    chain,
-    realized_value,
-    estimates=None,
-    strike_grid=None,
-    **kwargs,
-):
-    """Fit the implied-volatility baseline for one chain and score it."""
-    if estimates is None:
-        estimates, _ = estimate_forward_and_rate(chain)
-
-    results = create_density_from_chain(
-        chain,
-        forward=estimates["forward"],
-        risk_free_rate=estimates["risk_free_rate"],
-        strike_grid=strike_grid,
-        **kwargs,
-    )
-
-    result = evaluate_distribution(
-        results["strike_grid"],
-        results["cdf"],
-        realized_value,
-        estimates["forward"],
-        density=results["density"],
-    )
-
-    result.update(
-        strike_grid=results["strike_grid"],
-        density=results["density"],
-        cdf=results["cdf"],
-        risk_free_rate=estimates["risk_free_rate"],
-        negative_mass_clipped=results["negative_mass_clipped"],
-        mass_before_normalisation=results["mass_before_normalisation"],
-    )
-    return result
-
-
-# --------------------------------------------------------------------------
 # Risk-neutral to physical
 # --------------------------------------------------------------------------
 
@@ -494,25 +407,26 @@ def physical_density_from_rn_grid(
     Parameters
     ----------
     tilt_range : tuple[float, float], optional
-        Restrict the tilt and the renormalisation to this strike range,
-        leaving the density outside it untouched before renormalising. The
-        weight ``s^gamma`` is 39 times larger at ``2.5 F`` than at ``F``
-        when ``gamma`` is four, so an unrestricted tilt is partly acting on
-        extrapolated tail mass rather than on anything a price implies.
-        Supplying the traded-strike range is the robustness check.
+        Hold the kernel flat outside this strike range: the weight is
+        ``s^gamma`` inside it and stays at its boundary value beyond either
+        end. The weight ``s^gamma`` is 39 times larger at ``2.5 F`` than at
+        ``F`` when ``gamma`` is four, so an unrestricted tilt is partly
+        acting on extrapolated tail mass rather than on anything a price
+        implies. Supplying the traded-strike range is the robustness check.
     """
     strike_grid = np.asarray(strike_grid, dtype=float)
     density = np.asarray(risk_neutral_density, dtype=float)
 
+    # Holding the kernel at its boundary value keeps the tilted density
+    # continuous. (Setting the weight to one outside the range would make
+    # the relative tilt between the inside and the outside depend on the
+    # arbitrary normalising constant below.)
+    levels = strike_grid if tilt_range is None else np.clip(strike_grid, *tilt_range)
+
     # Scaling by a constant leaves the normalised density unchanged but
     # keeps s**gamma away from overflow at SPX levels.
     reference = float(np.median(strike_grid))
-    weights = (strike_grid / reference) ** float(gamma)
-
-    if tilt_range is not None:
-        low, high = tilt_range
-        inside = (strike_grid >= low) & (strike_grid <= high)
-        weights = np.where(inside, weights, 1.0)
+    weights = (levels / reference) ** float(gamma)
 
     unnormalized = weights * density
     total = float(np.trapezoid(unnormalized, strike_grid))
@@ -691,8 +605,12 @@ def gamma_plausible_interval(
         "standard_error": standard_errors,
         "lower": lower,
         "upper": upper,
-        "plausible_lower": float(plausible_gammas.min()) if plausible_gammas.size else np.nan,
-        "plausible_upper": float(plausible_gammas.max()) if plausible_gammas.size else np.nan,
+        "plausible_lower": (
+            float(plausible_gammas.min()) if plausible_gammas.size else np.nan
+        ),
+        "plausible_upper": (
+            float(plausible_gammas.max()) if plausible_gammas.size else np.nan
+        ),
         "one_se_lower": float(one_se_gammas.min()) if one_se_gammas.size else np.nan,
         "one_se_upper": float(one_se_gammas.max()) if one_se_gammas.size else np.nan,
         "confidence": confidence,
@@ -798,7 +716,9 @@ def crps_location_sensitivity(volatility, time_to_expiry, gammas=(1, 2, 3, 4)):
     return rows
 
 
-def tilt_moment_summary(strike_grid, density, gammas=(1, 2, 3, 4), tilt_range=None):
+def tilt_moment_summary(
+    strike_grid, density, gammas=(1, 2, 3, 4), tilt_range=None, support=None
+):
     """What the tilt does to a density's location, width and skew.
 
     On a lognormal the tilt is pure location. On a realistically
@@ -809,18 +729,21 @@ def tilt_moment_summary(strike_grid, density, gammas=(1, 2, 3, 4), tilt_range=No
     risk premium -- and it is the argument for wanting a second parameter
     rather than for wanting a longer sample.
 
+    ``support`` is passed to ``distribution_moments``; give it the traded
+    strike range, or the log-skewness describes the extrapolated tail.
+
     Returns a list of dicts, one per gamma, with the moments and their
     change from the untilted density.
     """
     strike_grid, density = _clean_grid(strike_grid, density)
-    base = distribution_moments(strike_grid, density)
+    base = distribution_moments(strike_grid, density, support=support)
 
     rows = []
     for gamma in (0.0, *gammas):
         tilted = physical_density_from_rn_grid(
             strike_grid, density, gamma, tilt_range=tilt_range
         )
-        moments = distribution_moments(strike_grid, tilted)
+        moments = distribution_moments(strike_grid, tilted, support=support)
         rows.append({
             "gamma": float(gamma),
             "mean": moments["mean"],

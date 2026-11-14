@@ -45,6 +45,8 @@ Surface." *Quantitative Finance*, 9(4), 417-428.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy.interpolate import BSpline
@@ -185,8 +187,8 @@ def build_call_spline_program(
     """Assemble the matrices of the shape-constrained smoothing problem.
 
     Construction is kept separate from solving so that the spline basis,
-    the roughness quadrature and the constraint set can be verified against
-    an independent solver in the test suite.
+    the roughness quadrature and the constraint set can be checked on their
+    own in the test suite.
 
     Parameters
     ----------
@@ -321,8 +323,7 @@ def _solve_with_cvxpy(program, roughness_penalty):
         coefficients, cp.psd_wrap(program["roughness_matrix"])
     )
 
-    # Both solvers consume the same constraint description, so the
-    # reference solver in the tests is checking this exact program.
+    # The tests check this same constraint description directly.
     matrix, lower, upper = constraint_bounds(program)
     constrained = matrix @ coefficients
 
@@ -337,7 +338,11 @@ def _solve_with_cvxpy(program, roughness_penalty):
     problem = cp.Problem(
         cp.Minimize(data_loss + roughness_penalty * roughness), constraints
     )
-    problem.solve(solver=cp.CLARABEL)
+    # An OPTIMAL_INACCURATE status is recorded in the result as
+    # ``solver_inaccurate``, so cvxpy's warning about it is only noise.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Solution may be inaccurate")
+        problem.solve(solver=cp.CLARABEL)
 
     if problem.status not in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}:
         raise SolverError(f"Spline optimisation failed: {problem.status}")
@@ -354,7 +359,7 @@ def constraint_bounds(program: dict):
 
     Stacking the value, slope and curvature blocks in this form keeps the
     boundary equalities and the interior inequalities in one place, which
-    is what both solvers and the tests consume.
+    is what the solver and the tests consume.
     """
     values = program["value_basis"]
     slopes = program["first_basis"]
@@ -385,135 +390,12 @@ def constraint_bounds(program: dict):
     return matrix, lower, upper
 
 
-def _quadratic_terms(program, roughness_penalty):
-    """Return ``P``, ``q`` for the objective ``0.5 c'Pc + q'c``."""
-    weight = 1.0 / program["error_scale"]
-    design = program["basis_matrix"] * weight[:, None]
-    target = program["observed_y"] * weight
-
-    hessian = 2.0 * (
-        design.T @ design + roughness_penalty * program["roughness_matrix"]
-    )
-    linear = -2.0 * (design.T @ target)
-    constant = float(target @ target)
-
-    return hessian, linear, constant
-
-
-def _solve_with_scipy(
-    program,
-    roughness_penalty,
-    sigma=1e-9,
-    relaxation=1.6,
-    iterations=20000,
-    tolerance=1e-9,
-):
-    """Reference solver used when cvxpy is not installed.
-
-    A compact ADMM solver for ``min 0.5 c'Pc + q'c`` subject to
-    ``l <= Ac <= u``, which is exactly the program the cvxpy path hands to
-    CLARABEL. It needs nothing beyond NumPy and SciPy, so the whole
-    pipeline -- including the end-to-end density-recovery test -- can run in
-    a bare environment. cvxpy remains the production path: this is slower
-    and less accurate on chains with several hundred strikes.
-
-    The objective is rescaled to unit norm before solving, because the
-    standardised pricing errors are divided by half-spreads of order
-    1e-4 while the constraint rows are of order one; without that the
-    penalty parameter cannot serve both.
-    """
-    from scipy.linalg import cho_factor, cho_solve
-
-    hessian, linear, constant = _quadratic_terms(program, roughness_penalty)
-    matrix, lower, upper = constraint_bounds(program)
-
-    scale = float(np.max(np.abs(hessian))) or 1.0
-    hessian, linear = hessian / scale, linear / scale
-
-    # Row-equilibrate the constraints. Curvature rows carry entries of
-    # order 1/h^2 in the knot spacing while value rows are of order one,
-    # and a single penalty parameter cannot serve both scales at once.
-    row_scale = np.maximum(np.max(np.abs(matrix), axis=1), 1e-12)
-    matrix = matrix / row_scale[:, None]
-    lower = np.where(np.isfinite(lower), lower / row_scale, lower)
-    upper = np.where(np.isfinite(upper), upper / row_scale, upper)
-
-    n = hessian.shape[0]
-    m = matrix.shape[0]
-    gram = matrix.T @ matrix
-
-    rho = 1.0
-    factor = cho_factor(hessian + sigma * np.eye(n) + rho * gram)
-
-    c = np.zeros(n)
-    z = np.zeros(m)
-    y = np.zeros(m)
-
-    primal = dual = np.inf
-
-    for iteration in range(1, iterations + 1):
-        candidate = cho_solve(factor, sigma * c - linear + matrix.T @ (rho * z - y))
-        c = candidate
-
-        constrained = matrix @ c
-        relaxed = relaxation * constrained + (1.0 - relaxation) * z
-
-        z_previous = z
-        z = np.clip(relaxed + y / rho, lower, upper)
-        y = y + rho * (relaxed - z)
-
-        primal = float(np.max(np.abs(constrained - z)))
-        dual = float(rho * np.max(np.abs(matrix.T @ (z - z_previous))))
-
-        if primal < tolerance and dual < tolerance:
-            break
-
-        # Keep the two residuals within an order of magnitude of each other.
-        if iteration % 100 == 0:
-            if primal > 10 * dual:
-                rho = min(rho * 5.0, 1e8)
-            elif dual > 10 * primal:
-                rho = max(rho / 5.0, 1e-8)
-            else:
-                continue
-            factor = cho_factor(hessian + sigma * np.eye(n) + rho * gram)
-
-    if primal > 1e-6:
-        raise SolverError(
-            f"Reference solver did not converge (primal residual {primal:.2e})."
-        )
-
-    objective = float(
-        scale * (0.5 * c @ hessian @ c + linear @ c) + constant
-    )
-    return c, "optimal", objective
-
-
 def solve_call_spline_program(
-    program: dict,
-    roughness_penalty: float = ROUGHNESS_PENALTY,
-    solver: str = "auto",
+    program: dict, roughness_penalty: float = ROUGHNESS_PENALTY
 ):
-    """Solve an assembled program and return coefficients and solver status.
-
-    ``solver`` may be ``"cvxpy"``, ``"scipy"`` or ``"auto"``, which prefers
-    cvxpy and falls back to the SciPy reference solver if it is not
-    installed.
-    """
+    """Solve an assembled program; return coefficients, status and objective."""
     if roughness_penalty < 0:
         raise ValueError("roughness_penalty must be non-negative.")
-
-    if solver == "cvxpy":
-        return _solve_with_cvxpy(program, roughness_penalty)
-    if solver == "scipy":
-        return _solve_with_scipy(program, roughness_penalty)
-    if solver != "auto":
-        raise ValueError("solver must be 'cvxpy', 'scipy' or 'auto'.")
-
-    try:
-        import cvxpy  # noqa: F401
-    except ImportError:
-        return _solve_with_scipy(program, roughness_penalty)
     return _solve_with_cvxpy(program, roughness_penalty)
 
 
@@ -530,7 +412,6 @@ def fit_shape_constrained_call_spline(
     n_tail_knots: int = N_TAIL_KNOTS,
     quotes: pd.DataFrame | None = None,
     knot_strikes=None,
-    solver: str = "auto",
 ) -> dict:
     """Fit the complete shape-constrained call-price curve for one chain.
 
@@ -628,7 +509,7 @@ def fit_shape_constrained_call_spline(
     )
 
     coefficients, status, objective_value = solve_call_spline_program(
-        program, roughness_penalty, solver=solver
+        program, roughness_penalty
     )
 
     spline = BSpline(
@@ -649,7 +530,9 @@ def fit_shape_constrained_call_spline(
 
     # Probability mass outside the traded strike range is extrapolation,
     # not measurement, so it is reported rather than buried.
-    cdf_at = lambda x: 1.0 + float(spline.derivative(1)(x))
+    def cdf_at(x):
+        return 1.0 + float(spline.derivative(1)(x))
+
     mass_below_traded = cdf_at(observed_x.min())
     mass_above_traded = 1.0 - cdf_at(observed_x.max())
 

@@ -27,30 +27,21 @@ from implied_stock_distributions.smoothing import create_density_from_chain
 
 from .synthetic import lognormal_cdf, lognormal_density, synthetic_chain
 
-SOLVERS = ["scipy"]
-try:  # pragma: no cover - depends on the environment
-    import cvxpy  # noqa: F401
-    SOLVERS.append("cvxpy")
-except ImportError:  # pragma: no cover
-    pass
 
-
-def _fit(chain, solver, **kwargs):
+def _fit(chain, **kwargs):
     estimates, _ = estimate_forward_and_rate(chain)
     return fit_shape_constrained_call_spline(
         chain,
         forward=estimates["forward"],
         risk_free_rate=estimates["risk_free_rate"],
-        solver=solver,
         **kwargs,
     )
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_recovers_the_lognormal_density(solver):
+def test_recovers_the_lognormal_density():
     chain, truth = synthetic_chain(strike_step=50.0)
     distribution = construct_risk_neutral_distribution_from_spline(
-        _fit(chain, solver, roughness_penalty=10.0)
+        _fit(chain, roughness_penalty=10.0)
     )
 
     grid = distribution["strike_grid"]
@@ -65,11 +56,10 @@ def test_recovers_the_lognormal_density(solver):
     assert l1_error < 0.05
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_recovers_the_lognormal_cdf(solver):
+def test_recovers_the_lognormal_cdf():
     chain, truth = synthetic_chain(strike_step=50.0)
     distribution = construct_risk_neutral_distribution_from_spline(
-        _fit(chain, solver, roughness_penalty=10.0)
+        _fit(chain, roughness_penalty=10.0)
     )
 
     grid = distribution["strike_grid"]
@@ -79,11 +69,10 @@ def test_recovers_the_lognormal_cdf(solver):
     assert np.max(np.abs(distribution["cdf"] - exact)) < 0.02
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_mass_is_one_and_mean_is_the_forward(solver):
+def test_mass_is_one_and_mean_is_the_forward():
     """Both follow from the boundary conditions, not from renormalising."""
     chain, truth = synthetic_chain(strike_step=50.0, noise=0.4, seed=7)
-    fit = _fit(chain, solver, roughness_penalty=100.0)
+    fit = _fit(chain, roughness_penalty=100.0)
     distribution = construct_risk_neutral_distribution_from_spline(fit)
 
     assert distribution["mass"] == pytest.approx(1.0, abs=1e-4)
@@ -92,20 +81,18 @@ def test_mass_is_one_and_mean_is_the_forward(solver):
     assert distribution["cdf_end"] == pytest.approx(1.0, abs=1e-6)
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_density_is_never_negative(solver):
+def test_density_is_never_negative():
     """The point of the constraints: no arbitrage even with noisy quotes."""
     chain, _ = synthetic_chain(strike_step=25.0, noise=0.8, skew=-0.35, seed=13)
-    fit = _fit(chain, solver, roughness_penalty=100.0)
+    fit = _fit(chain, roughness_penalty=100.0)
     distribution = construct_risk_neutral_distribution_from_spline(fit)
 
     assert distribution["minimum_density"] > -1e-8
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_call_curve_is_decreasing_and_convex(solver):
+def test_call_curve_is_decreasing_and_convex():
     chain, _ = synthetic_chain(strike_step=25.0, noise=0.8, seed=17)
-    fit = _fit(chain, solver, roughness_penalty=100.0)
+    fit = _fit(chain, roughness_penalty=100.0)
 
     grid = np.linspace(0.0, fit["x_upper"], 4000)
     first = fit["spline"].derivative(1)(grid)
@@ -123,8 +110,8 @@ def test_call_curve_is_decreasing_and_convex(solver):
 def test_a_larger_penalty_gives_a_smoother_fit():
     chain, _ = synthetic_chain(strike_step=25.0, noise=1.0, seed=23)
 
-    rough = _fit(chain, "scipy", roughness_penalty=1.0)
-    smooth = _fit(chain, "scipy", roughness_penalty=1e4)
+    rough = _fit(chain, roughness_penalty=1.0)
+    smooth = _fit(chain, roughness_penalty=1e4)
 
     def curvature(fit):
         grid = np.linspace(0.0, fit["x_upper"], 2000)
@@ -146,8 +133,8 @@ def test_extrapolated_mass_is_reported():
         strike_step=25.0, lower_moneyness=0.50, upper_moneyness=1.50
     )
 
-    narrow_fit = _fit(narrow, "scipy", roughness_penalty=100.0)
-    wide_fit = _fit(wide, "scipy", roughness_penalty=100.0)
+    narrow_fit = _fit(narrow, roughness_penalty=100.0)
+    wide_fit = _fit(wide, roughness_penalty=100.0)
 
     assert narrow_fit["extrapolated_mass"] > wide_fit["extrapolated_mass"]
     assert narrow_fit["extrapolated_mass"] > 0.01

@@ -112,7 +112,7 @@ MIN_PARITY_PAIRS = 10
 # can clear 0.999 while sitting outside the quoted spreads at half the
 # strikes, because the spread of the *data* in the numerator is enormous
 # compared with the residual. The share of pairs whose parity residual
-# exceeds the average half-spread is the gate that means something, and it
+# exceeds the call plus put half-spread is the gate that means something, and it
 # is the one to quote to a market maker. Both are enforced.
 MIN_PARITY_R_SQUARED = 0.999
 MAX_FRACTION_OUTSIDE_SPREADS = 0.25

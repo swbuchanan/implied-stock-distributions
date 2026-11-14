@@ -84,7 +84,9 @@ def newey_west_variance(values, lag: int) -> float:
     return variance
 
 
-def rows_per_observation_date(frame: pd.DataFrame, date_column: str = "data_date") -> float:
+def rows_per_observation_date(
+    frame: pd.DataFrame, date_column: str = "data_date"
+) -> float:
     """Average number of rows the score table carries per observation date.
 
     This is the factor converting a horizon lag in trading days into a lag
@@ -175,7 +177,10 @@ def diebold_mariano(
 
     standard_error = float(np.sqrt(max(variance, 0.0) / n))
     statistic = mean_difference / standard_error if standard_error > 0 else np.nan
-    p_value = 2.0 * (1.0 - stats.norm.cdf(abs(statistic))) if np.isfinite(statistic) else np.nan
+    p_value = (
+        2.0 * (1.0 - stats.norm.cdf(abs(statistic)))
+        if np.isfinite(statistic) else np.nan
+    )
 
     naive_error = float(differential.std(ddof=1) / np.sqrt(n))
 

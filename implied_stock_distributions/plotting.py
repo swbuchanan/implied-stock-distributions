@@ -18,9 +18,8 @@ next to the code that builds their inputs.
 
 from __future__ import annotations
 
-import numpy as np
-
 import matplotlib.pyplot as plt
+import numpy as np
 
 __all__ = [
     "PALETTE",
@@ -29,7 +28,6 @@ __all__ = [
     "plot_parity_fit",
     "plot_naive_price_smoothing",
     "plot_method_comparison",
-    "plot_density_with_outcome",
     "plot_roughness_cv",
     "plot_pit_histogram",
     "plot_score_by_group",
@@ -153,7 +151,8 @@ def plot_parity_fit(info, estimates, pairs, ax=None, inset=True):
         info,
         f"Put-call parity fit  ·  implied rate {estimates['risk_free_rate']:.2%}"
         f"  ·  R² {estimates['r_squared']:.6f}"
-        f"  ·  {estimates.get('fraction_outside_spreads', float('nan')):.1%} outside spreads",
+        f"  ·  {estimates.get('fraction_outside_spreads', float('nan')):.1%}"
+        " outside spreads",
     ))
     ax.legend()
 
@@ -287,42 +286,6 @@ def plot_method_comparison(
 
     return fig, axes
 
-
-def plot_density_with_outcome(results_by_horizon, horizons=(30, 60, 90)):
-    """One density per horizon with the realised settlement marked."""
-    fig, axes = plt.subplots(
-        1, len(horizons), figsize=(4.6 * len(horizons), 3.8), sharey=True
-    )
-    axes = np.atleast_1d(axes)
-
-    for ax, horizon in zip(axes, horizons):
-        result = results_by_horizon[horizon]
-
-        ax.plot(
-            result["strike_grid"], result["density"],
-            color=PALETTE["constrained"], label="Risk-neutral density",
-        )
-        ax.axvline(
-            result["realized_value"], color=PALETTE["violation"],
-            linestyle="--", linewidth=1.6,
-            label=f"Settlement {result['realized_value']:,.0f}",
-        )
-        ax.set_title(
-            f"{horizon}-day  ·  relative CRPS {result['relative_crps']:.4f}"
-        )
-        ax.set_xlabel("SPX at expiration")
-        ax.legend(fontsize=8)
-
-        centre = result["forward"]
-        ax.set_xlim(0.55 * centre, 1.45 * centre)
-
-    axes[0].set_ylabel("Density")
-    return fig, axes
-
-
-# --------------------------------------------------------------------------
-# Part 1: hyperparameter selection and extrapolation
-# --------------------------------------------------------------------------
 
 def plot_roughness_cv(summary, chosen, ax=None):
     """Held-out pricing error against the roughness penalty.

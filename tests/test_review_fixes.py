@@ -12,8 +12,8 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from implied_stock_distributions import benchmarks, evaluation, stats as isd_stats
-from implied_stock_distributions import validation
+from implied_stock_distributions import benchmarks, evaluation, validation
+from implied_stock_distributions import stats as isd_stats
 from implied_stock_distributions.fitting import (
     build_call_spline_program,
     fit_shape_constrained_call_spline,
@@ -552,9 +552,8 @@ def test_external_parsers_read_the_published_headers(tmp_path, monkeypatch):
     fred.write_text(
         "observation_date,DGS3MO\n2020-01-02,1.54\n2020-01-03,.\n2020-01-06,1.56\n"
     )
-    monkeypatch.setattr(
-        validation, "FRED_CSV_URL", str(fred).replace("{", "{{") + "{series}"[:0] or str(fred)
-    )
+    # A URL template with no {series} field formats to itself.
+    monkeypatch.setattr(validation, "FRED_CSV_URL", str(fred))
     frame = validation.fetch_fred_series("DGS3MO")
     assert len(frame) == 2                      # the '.' row is dropped
     assert frame["value"].iloc[0] == pytest.approx(0.0154)
