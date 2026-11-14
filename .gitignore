@@ -1,5 +1,18 @@
-*.txt
-data/raw/*
-data/processed/*
+# Licensed vendor data and everything derived from it.
+data/
 *.parquet
 *.pkl
+*.txt
+
+# Python and tooling.
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+.DS_Store
