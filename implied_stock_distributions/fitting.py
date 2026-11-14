@@ -1,744 +1,137 @@
-import cvxpy as cp
+"""Shape-constrained (Fengler-style) smoothing of the call-price curve.
+
+The curve is fitted in normalised coordinates
+
+    x = K / F,        g(x) = C(K) / (D * F),
+
+where ``F`` is the forward and ``D`` the discount factor. In these
+coordinates the Breeden-Litzenberger relation and the no-arbitrage shape
+restrictions are all linear or convex in the spline coefficients:
+
+    f_Q(K) = g''(K / F) / F,       F_Q(K) = 1 + g'(K / F).
+
+The program minimises a spread-standardised pricing error plus Fengler's
+roughness penalty, subject to constraints that make the fitted curve a
+complete probability distribution on ``0 <= S_T <= x_upper * F``:
+
+    g(0) = 1,   g'(0) = -1,   g(x_upper) = 0,   g'(x_upper) = 0,
+    g'' >= 0 everywhere,   -1 <= g' <= 0,   g >= max(1 - x, 0).
+
+Two consequences of that boundary set are worth stating, because they are
+free correctness checks on the whole pipeline:
+
+* ``integral f_Q = g'(x_upper) - g'(0) = 1`` exactly, so the fitted density
+  is normalised by construction and does not need rescaling afterwards.
+* ``E_Q[S_T] = F * (g(0) - g(x_upper)) = F`` exactly, so the fitted
+  distribution is automatically consistent with the forward implied by
+  put-call parity.
+
+Knots and data are separable
+----------------------------
+``knot_x`` sets the spline's breakpoints and ``observed_x`` sets the data
+the curve is fitted to; by default they coincide, since Fengler puts a knot
+at every observed strike. They must be separable for cross-validation to
+mean anything: holding out every fifth strike while letting the knot vector
+follow the training set removes a fifth of the basis functions too, so what
+is being compared across folds is not one model at different penalties but
+different function spaces. ``selection.cross_validate_chain`` therefore
+fixes ``knot_x`` from the full strike set and holds out only the data.
+
+Reference
+---------
+Fengler, M. R. (2009). "Arbitrage-Free Smoothing of the Implied Volatility
+Surface." *Quantitative Finance*, 9(4), 417-428.
+"""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from scipy.interpolate import BSpline
 
+from .config import (
+    DENSITY_GRID_POINTS,
+    MIN_ERROR_ABSOLUTE,
+    MIN_ERROR_FRACTION_OF_FORWARD,
+    MIN_QUOTES_FOR_SPLINE,
+    N_TAIL_KNOTS,
+    ROUGHNESS_PENALTY,
+    UPPER_SUPPORT_MULTIPLE,
+)
+from .errors import ChainQualityError, InsufficientQuotesError, SolverError
 from .forwards import estimate_forward_and_rate
 
-# def fit_shape_constrained_call_spline_old(
-#     chain: pd.DataFrame,
-#     forward: float | None = None,
-#     risk_free_rate: float | None = None,
-#     roughness_penalty: float = 1e-4,
-#     use_spread_weights: bool = True,
-#     price_error_floor: float = 0.05,
-#     n_grid: int = 1000,
-# ):
-#     """
-#     Fit a Fengler-style arbitrage-free natural cubic spline to one option
-#     expiration.
-
-#     The function constructs a smooth call-price curve as a function of
-#     forward moneyness. It fits the curve directly in option-price space,
-#     where the absence of static strike arbitrage can be expressed using
-#     linear constraints on the spline.
-
-#     The input should contain quotes from one observation date and one exact
-#     expiration. Out-of-the-money puts below the forward are converted to
-#     parity-equivalent calls, while out-of-the-money calls at or above the
-#     forward are used directly.
-
-#     The fitted curve uses the normalized variables
-
-#         x = K / F
-
-#     and
-
-#         g(x) = C(K) / (D * F),
-
-#     where K is strike, F is the forward price and D is the discount factor.
-
-#     The spline coefficients are obtained by minimizing
-
-#         weighted pricing error
-#         + roughness_penalty * integral[g''(x)^2 dx],
-
-#     subject to the following no-arbitrage restrictions:
-
-#     - The spline is a natural cubic spline, so its second derivative is zero
-#       at the first and last fitted strikes.
-#     - The call-price curve is convex, so g''(x) >= 0.
-#     - Its slope remains between -1 and 0.
-#     - Its value respects the normalized call-price bounds.
-#     - The fitted call price remains nonnegative.
-
-#     Because a cubic spline has a second derivative that is linear between
-#     consecutive knots, imposing nonnegative second derivatives at every
-#     knot ensures convexity throughout the fitted strike range.
-
-#     Parameters
-#     ----------
-#     chain : pandas.DataFrame
-#         Quotes belonging to one observation date and one exact expiration.
-
-#         The following columns are required:
-
-#         - ``strike_price``
-#         - ``put_call``
-#         - ``bid_price``
-#         - ``ask_price``
-#         - ``time_to_expiry_years``
-
-#         If ``mid_price`` is absent, it is calculated as the bid-ask
-#         midpoint. If ``quote_is_two_sided`` is present, only rows for which
-#         it is true are retained.
-
-#     forward : float or None, optional
-#         Forward price corresponding to the chain's expiration.
-
-#         If None, the forward is obtained from
-#         ``estimate_forward_and_rate(chain)``. If ``risk_free_rate`` is also
-#         None, both quantities are obtained from the same estimation call.
-
-#     risk_free_rate : float or None, optional
-#         Continuously compounded annualized risk-free rate expressed as a
-#         decimal; for example, 0.05 represents 5%.
-
-#         It is used to calculate the discount factor
-
-#             D = exp(-risk_free_rate * time_to_expiry).
-
-#         If None, it is obtained from
-#         ``estimate_forward_and_rate(chain)``.
-
-#     roughness_penalty : float, optional
-#         Nonnegative smoothing parameter multiplying
-
-#             integral[g''(x)^2 dx].
-
-#         Larger values produce a smoother and less curved call-price
-#         function, while smaller values allow the spline to follow the
-#         observed quotes more closely.
-
-#         Its appropriate scale depends on whether spread weighting is used.
-#         It should be selected systematically using training data rather
-#         than chosen separately by visual inspection for every chain.
-
-#     use_spread_weights : bool, optional
-#         If True, price errors are divided by the quote half-spread. This
-#         gives less weight to observations with wide bid-ask spreads.
-
-#         Spread weighting is a practical extension to Fengler's original
-#         unweighted objective.
-
-#     price_error_floor : float, optional
-#         Minimum price-error scale, in option-price points, used when spread
-#         weighting is enabled.
-
-#         It prevents quotes with zero or extremely small recorded spreads
-#         from receiving excessively large optimization weights.
-
-#     n_grid : int, optional
-#         Number of regularly spaced points used to evaluate the fitted
-#         spline after optimization.
-
-#         This affects only the returned output grid. It does not determine
-#         the number of spline knots because every retained observed strike
-#         is used as a breakpoint.
-
-#     Returns
-#     -------
-#     dict
-#         Dictionary containing the following entries:
-
-#         ``strike_grid`` : numpy.ndarray
-#             Strike values over the fitted domain.
-
-#         ``smooth_prices`` : numpy.ndarray
-#             Fitted present-value call prices evaluated on ``strike_grid``.
-
-#         ``density`` : numpy.ndarray
-#             Breeden-Litzenberger risk-neutral density over the fitted
-#             strike range, calculated as
-
-#                 f_Q(K) = g''(K / F) / F.
-
-#         ``cdf`` : numpy.ndarray
-#             Risk-neutral CDF values over the fitted strike range,
-#             calculated as
-
-#                 F_Q(K) = 1 + g'(K / F).
-
-#             Because the unobserved tails are not completed by this
-#             function, the first value need not be zero and the last value
-#             need not be one.
-
-#         ``spline`` : scipy.interpolate.BSpline
-#             Fitted normalized call-price spline. Its input is normalized
-#             strike ``K / F``, not the strike itself.
-
-#         ``quotes`` : pandas.DataFrame
-#             Filtered quotes used in the optimization, including
-#             ``call_equivalent_price``, ``fitted_call_price`` and
-#             ``pricing_residual``.
-
-#         ``strike_bounds`` : tuple[float, float]
-#             Lowest and highest strikes covered by the fitted spline.
-
-#         ``interior_probability_mass`` : float
-#             Probability mass contained between ``strike_bounds``. This is
-#             equal to the change in the fitted CDF across the fitted range
-#             and need not equal one.
-
-#         ``minimum_density`` : float
-#             Smallest fitted density value. It should be nonnegative apart
-#             from very small numerical solver errors.
-
-#         ``objective_value`` : float
-#             Final value of the optimization objective.
-
-#         ``solver_status`` : str
-#             Status reported by CVXPY.
-
-#         ``forward`` : float
-#             Forward used in normalization and put-call conversion.
-
-#         ``discount_factor`` : float
-#             Discount factor used in the fit.
-
-#         ``time_to_expiry`` : float
-#             Time to expiration in years.
-
-#     Raises
-#     ------
-#     ValueError
-#         If the forward or time to expiry is invalid, if the chain contains
-#         multiple time-to-expiry values, if duplicate selected strikes are
-#         found, or if fewer than eight usable quotes remain.
-
-#     RuntimeError
-#         If the convex optimization problem does not return an optimal or
-#         approximately optimal solution.
-
-#     Notes
-#     -----
-#     Puts are converted to parity-equivalent calls using
-
-#         C = P + D * (F - K).
-
-#     The additive parity term is linear in strike and therefore has zero
-#     second derivative. Consequently, this transformation does not change
-#     the Breeden-Litzenberger density information.
-
-#     This function implements only the single-maturity part of Fengler's
-#     method. It does not implement the initial total-variance pre-smoother
-#     or the backwards calendar-arbitrage constraints needed to construct an
-#     entire arbitrage-free volatility surface.
-
-#     It also does not complete the distribution outside the observed strike
-#     range. A separate tail model is required before the resulting CDF can
-#     be used as a complete predictive distribution for CRPS.
-
-#     References
-#     ----------
-#     Fengler, M. R. (2009).
-#     "Arbitrage-Free Smoothing of the Implied Volatility Surface."
-#     Quantitative Finance, 9(4), 417-428.
-#     """
-
-#     if forward is None or risk_free_rate is None:
-#         estimates, _ = estimate_forward_and_rate(chain)
-
-#         forward = (
-#             estimates["forward"]
-#             if forward is None
-#             else forward
-#         )
-
-#         risk_free_rate = (
-#             estimates["risk_free_rate"]
-#             if risk_free_rate is None
-#             else risk_free_rate
-#         )
-
-#     forward = float(forward)
-#     risk_free_rate = float(risk_free_rate)
-
-#     if not np.isfinite(forward) or forward <= 0:
-#         raise ValueError("Forward must be finite and positive.")
-
-#     time_values = (
-#         chain["time_to_expiry_years"]
-#         .dropna()
-#         .unique()
-#     )
-
-#     if len(time_values) != 1:
-#         raise ValueError(
-#             "Expected one time-to-expiry value."
-#         )
-
-#     time_to_expiry = float(time_values[0])
-
-#     if not np.isfinite(time_to_expiry) or time_to_expiry <= 0:
-#         raise ValueError(
-#             "Time to expiry must be finite and positive."
-#         )
-
-#     discount_factor = np.exp(
-#         -risk_free_rate * time_to_expiry
-#     )
-
-#     quotes = chain.copy()
-
-#     # Prefer reliable, two-sided quotes.
-#     if "quote_is_two_sided" in quotes.columns:
-#         quotes = quotes.loc[
-#             quotes["quote_is_two_sided"].fillna(False)
-#         ].copy()
-#     else:
-#         quotes = quotes.loc[
-#             (quotes["bid_price"] > 0)
-#             & (quotes["ask_price"] >= quotes["bid_price"])
-#         ].copy()
-
-#     if "mid_price" not in quotes.columns:
-#         quotes["mid_price"] = (
-#             quotes["bid_price"] + quotes["ask_price"]
-#         ) / 2
-
-#     quotes["spread"] = (
-#         quotes["ask_price"] - quotes["bid_price"]
-#     )
-
-#     # Use OTM puts below the forward and OTM calls above it.
-#     use_quote = (
-#         (
-#             quotes["put_call"].eq("put")
-#             & quotes["strike_price"].lt(forward)
-#         )
-#         | (
-#             quotes["put_call"].eq("call")
-#             & quotes["strike_price"].ge(forward)
-#         )
-#     )
-
-#     quotes = quotes.loc[use_quote].copy()
-
-#     # Convert puts to parity-equivalent call prices:
-#     #
-#     # C = P + D(F - K)
-#     quotes["call_equivalent_price"] = np.where(
-#         quotes["put_call"].eq("call"),
-#         quotes["mid_price"],
-#         quotes["mid_price"]
-#         + discount_factor
-#         * (forward - quotes["strike_price"]),
-#     )
-
-#     required_values = quotes[
-#         [
-#             "strike_price",
-#             "call_equivalent_price",
-#             "spread",
-#         ]
-#     ].to_numpy(dtype=float)
-
-#     valid = (
-#         np.isfinite(required_values).all(axis=1)
-#         & quotes["strike_price"].gt(0)
-#         & quotes["call_equivalent_price"].ge(0)
-#         & quotes["spread"].ge(0)
-#     )
-
-#     quotes = (
-#         quotes.loc[valid]
-#         .sort_values("strike_price")
-#         .reset_index(drop=True)
-#     )
-
-#     if quotes["strike_price"].duplicated().any():
-#         raise ValueError(
-#             "Duplicate strikes found in selected quotes."
-#         )
-
-#     if len(quotes) < 8:
-#         raise ValueError(
-#             "Too few valid quotes to fit a cubic spline."
-#         )
-
-#     # Normalize:
-#     #
-#     # x = K / F
-#     # g(x) = C(K) / (D F)
-#     x = (
-#         quotes["strike_price"].to_numpy(dtype=float)
-#         / forward
-#     )
-
-#     y = (
-#         quotes["call_equivalent_price"].to_numpy(dtype=float)
-#         / (discount_factor * forward)
-#     )
-
-#     if use_spread_weights:
-#         error_scale = (
-#             np.maximum(
-#                 quotes["spread"].to_numpy(dtype=float) / 2,
-#                 price_error_floor,
-#             )
-#             / (discount_factor * forward)
-#         )
-#     else:
-#         error_scale = np.ones_like(y)
-
-#     # In a natural smoothing spline, each distinct observation location
-#     # is a breakpoint.
-#     breakpoints = x
-#     x_left = float(x[0])
-#     x_right = float(x[-1])
-
-#     degree = 3
-#     internal_knots = breakpoints[1:-1]
-
-#     # Open cubic B-spline knot vector.
-#     knots = np.concatenate([
-#         np.repeat(x_left, degree + 1),
-#         internal_knots,
-#         np.repeat(x_right, degree + 1),
-#     ])
-
-#     n_coefficients = len(knots) - degree - 1
-
-#     # Each column is one B-spline basis function.
-#     basis = BSpline(
-#         knots,
-#         np.eye(n_coefficients),
-#         degree,
-#         extrapolate=False,
-#     )
-
-#     observed_basis = basis(x)
-
-#     endpoint_values = basis(
-#         np.array([x_left, x_right])
-#     )
-
-#     endpoint_slopes = basis.derivative(1)(
-#         np.array([x_left, x_right])
-#     )
-
-#     second_at_breakpoints = basis.derivative(2)(
-#         breakpoints
-#     )
-
-#     # Compute the Fengler roughness penalty exactly:
-#     #
-#     # integral [g''(x)]^2 dx
-#     #
-#     # g'' is linear inside each interval, so two-point Gaussian
-#     # quadrature exactly integrates its square.
-#     interval_left = breakpoints[:-1]
-#     interval_right = breakpoints[1:]
-
-#     interval_midpoints = (
-#         interval_left + interval_right
-#     ) / 2
-
-#     interval_half_widths = (
-#         interval_right - interval_left
-#     ) / 2
-
-#     offset = interval_half_widths / np.sqrt(3)
-
-#     quadrature_points = np.concatenate([
-#         interval_midpoints - offset,
-#         interval_midpoints + offset,
-#     ])
-
-#     quadrature_weights = np.concatenate([
-#         interval_half_widths,
-#         interval_half_widths,
-#     ])
-
-#     second_at_quadrature = basis.derivative(2)(
-#         quadrature_points
-#     )
-
-#     coefficients = cp.Variable(n_coefficients)
-
-#     fitted_normalized_prices = (
-#         observed_basis @ coefficients
-#     )
-
-#     standardized_errors = cp.multiply(
-#         1 / error_scale,
-#         fitted_normalized_prices - y,
-#     )
-
-#     data_loss = (
-#         cp.sum_squares(standardized_errors)
-#         / len(y)
-#     )
-
-#     roughness = cp.sum(
-#         cp.multiply(
-#             quadrature_weights,
-#             cp.square(
-#                 second_at_quadrature @ coefficients
-#             ),
-#         )
-#     )
-
-#     fitted_endpoint_values = (
-#         endpoint_values @ coefficients
-#     )
-
-#     fitted_endpoint_slopes = (
-#         endpoint_slopes @ coefficients
-#     )
-
-#     fitted_second_derivatives = (
-#         second_at_breakpoints @ coefficients
-#     )
-
-#     constraints = [
-#         # Natural cubic spline: zero second derivative at each end.
-#         fitted_second_derivatives[0] == 0,
-#         fitted_second_derivatives[-1] == 0,
-
-#         # Convexity. Because g'' is linear between breakpoints,
-#         # checking every breakpoint enforces it everywhere.
-#         fitted_second_derivatives >= 0,
-
-#         # Boundary slope restrictions. Together with convexity these
-#         # imply -1 <= g'(x) <= 0 throughout the fitted interval.
-#         fitted_endpoint_slopes[0] >= -1,
-#         fitted_endpoint_slopes[-1] <= 0,
-
-#         # Left call-price bounds.
-#         fitted_endpoint_values[0]
-#         >= max(1 - x_left, 0),
-
-#         fitted_endpoint_values[0] <= 1,
-
-#         # Right call price must remain nonnegative.
-#         fitted_endpoint_values[-1] >= 0,
-#     ]
-
-#     problem = cp.Problem(
-#         cp.Minimize(
-#             data_loss
-#             + roughness_penalty * roughness
-#         ),
-#         constraints,
-#     )
-
-#     problem.solve(solver=cp.CLARABEL)
-
-#     if problem.status not in {
-#         cp.OPTIMAL,
-#         # cp.OPTIMAL_INACCURATE,
-#     }:
-#         raise RuntimeError(
-#             f"Spline optimization failed: {problem.status}"
-#         )
-
-#     normalized_call_spline = BSpline(
-#         knots,
-#         np.asarray(coefficients.value).ravel(),
-#         degree,
-#         extrapolate=False,
-#     )
-
-#     # Include all breakpoints in the output grid.
-#     x_grid = np.unique(np.concatenate([
-#         np.linspace(x_left, x_right, n_grid),
-#         breakpoints,
-#     ]))
-
-#     strike_grid = forward * x_grid
-
-#     smooth_prices = (
-#         discount_factor
-#         * forward
-#         * normalized_call_spline(x_grid)
-#     )
-
-#     density = (
-#         normalized_call_spline.derivative(2)(x_grid)
-#         / forward
-#     )
-
-#     cdf = (
-#         1 + normalized_call_spline.derivative(1)(x_grid)
-#     )
-
-#     quotes["fitted_call_price"] = (
-#         discount_factor
-#         * forward
-#         * normalized_call_spline(x)
-#     )
-
-#     quotes["pricing_residual"] = (
-#         quotes["fitted_call_price"]
-#         - quotes["call_equivalent_price"]
-#     )
-
-#     return {
-#         "strike_grid": strike_grid,
-#         "smooth_prices": smooth_prices,
-#         "density": density,
-#         "cdf": cdf,
-#         "spline": normalized_call_spline,
-#         "quotes": quotes,
-#         "strike_bounds": (
-#             forward * x_left,
-#             forward * x_right,
-#         ),
-#         "interior_probability_mass": (
-#             cdf[-1] - cdf[0]
-#         ),
-#         "minimum_density": float(density.min()),
-#         "objective_value": float(problem.value),
-#         "solver_status": problem.status,
-#         "forward": forward,
-#         "discount_factor": discount_factor,
-#         "time_to_expiry": time_to_expiry,
-#     }
-
-
-
-def fit_shape_constrained_call_spline(
+__all__ = [
+    "select_call_equivalent_quotes",
+    "pricing_error_scale",
+    "build_call_spline_program",
+    "constraint_bounds",
+    "solve_call_spline_program",
+    "fit_shape_constrained_call_spline",
+    "construct_risk_neutral_distribution_from_spline",
+]
+
+DEGREE = 3
+
+
+# --------------------------------------------------------------------------
+# Quote selection
+# --------------------------------------------------------------------------
+
+def select_call_equivalent_quotes(
     chain: pd.DataFrame,
-    forward: float | None = None,
-    risk_free_rate: float | None = None,
-    roughness_penalty: float = 1e-4,
-    upper_support_multiple: float = 2.5,
-    n_tail_knots: int = 3,
-    use_spread_weights: bool = True,
-    price_error_floor: float = 0.05,
-):
+    forward: float,
+    discount_factor: float,
+) -> pd.DataFrame:
+    """Return one out-of-the-money quote per strike, as a call price.
+
+    Out-of-the-money puts below the forward and out-of-the-money calls at
+    or above it are the liquid side of each strike. Puts are converted with
+    ``C = P + D (F - K)``; the parity term is linear in strike and so has
+    no effect on the second derivative that becomes the density.
+
+    The same selection is used by the implied-volatility baseline, so that
+    the two methods see identical information.
     """
-    Fit a complete shape-constrained call-price spline to one option chain.
-
-    The curve is fitted in normalized coordinates,
-
-        x = K / F
-        g(x) = C(K) / (D * F),
-
-    where F is the forward and D is the discount factor.
-
-    The objective combines quote-fitting error with Fengler's roughness
-    penalty,
-
-        integral [g''(x)]^2 dx.
-
-    The constraints ensure that the fitted curve corresponds to a complete
-    nonnegative risk-neutral distribution on
-
-        0 <= S_T <= upper_support_multiple * F.
-
-    Notes
-    -----
-    This is a Fengler-style single-maturity fit with an additional explicit
-    compact-support assumption. The compact-support conditions are required
-    because observed option strikes do not identify the complete tails.
-    """
-
-    if roughness_penalty < 0:
-        raise ValueError(
-            "roughness_penalty must be nonnegative."
-        )
-
-    if upper_support_multiple <= 1:
-        raise ValueError(
-            "upper_support_multiple must exceed 1."
-        )
-
-    if n_tail_knots < 0:
-        raise ValueError(
-            "n_tail_knots must be nonnegative."
-        )
-
-    if forward is None or risk_free_rate is None:
-        estimates, _ = estimate_forward_and_rate(chain)
-
-        forward = (
-            estimates["forward"]
-            if forward is None
-            else forward
-        )
-
-        risk_free_rate = (
-            estimates["risk_free_rate"]
-            if risk_free_rate is None
-            else risk_free_rate
-        )
-
-    forward = float(forward)
-    risk_free_rate = float(risk_free_rate)
-
-    if not np.isfinite(forward) or forward <= 0:
-        raise ValueError(
-            "Forward must be finite and positive."
-        )
-
-    time_values = (
-        chain["time_to_expiry_years"]
-        .dropna()
-        .unique()
-    )
-
-    if len(time_values) != 1:
-        raise ValueError(
-            "Expected one time-to-expiry value."
-        )
-
-    time_to_expiry = float(time_values[0])
-
-    if not np.isfinite(time_to_expiry) or time_to_expiry <= 0:
-        raise ValueError(
-            "Time to expiry must be finite and positive."
-        )
-
-    discount_factor = np.exp(
-        -risk_free_rate * time_to_expiry
-    )
-
     quotes = chain.copy()
 
     if "quote_is_two_sided" in quotes.columns:
-        quotes = quotes.loc[
-            quotes["quote_is_two_sided"].fillna(False)
-        ].copy()
+        quotes = quotes.loc[quotes["quote_is_two_sided"].fillna(False)].copy()
     else:
         quotes = quotes.loc[
             (quotes["bid_price"] > 0)
             & (quotes["ask_price"] >= quotes["bid_price"])
         ].copy()
 
-    quotes["spread"] = (
-        quotes["ask_price"] - quotes["bid_price"]
+    if "mid_price" not in quotes.columns:
+        quotes["mid_price"] = (quotes["bid_price"] + quotes["ask_price"]) / 2
+
+    quotes["spread"] = quotes["ask_price"] - quotes["bid_price"]
+
+    out_of_the_money = (
+        quotes["put_call"].eq("put") & quotes["strike_price"].lt(forward)
+    ) | (
+        quotes["put_call"].eq("call") & quotes["strike_price"].ge(forward)
     )
 
-    # Use OTM puts below the forward and OTM calls above it.
-    use_quote = (
-        (
-            quotes["put_call"].eq("put")
-            & quotes["strike_price"].lt(forward)
-        )
-        | (
-            quotes["put_call"].eq("call")
-            & quotes["strike_price"].ge(forward)
-        )
-    )
+    quotes = quotes.loc[out_of_the_money].copy()
 
-    quotes = quotes.loc[use_quote].copy()
-
-    # Convert puts to parity-equivalent calls:
-    # C = P + D(F - K).
     quotes["call_equivalent_price"] = np.where(
         quotes["put_call"].eq("call"),
         quotes["mid_price"],
         quotes["mid_price"]
-        + discount_factor
-        * (forward - quotes["strike_price"]),
+        + discount_factor * (forward - quotes["strike_price"]),
     )
 
     values = quotes[
-        [
-            "strike_price",
-            "call_equivalent_price",
-            "spread",
-        ]
+        ["strike_price", "call_equivalent_price", "spread"]
     ].to_numpy(dtype=float)
 
     valid = (
         np.isfinite(values).all(axis=1)
-        & np.asarray(quotes["strike_price"].gt(0))
-        & quotes["call_equivalent_price"].ge(0)
-        & quotes["spread"].ge(0)
+        & (values[:, 0] > 0)
+        & (values[:, 1] >= 0)
+        & (values[:, 2] >= 0)
     )
 
     quotes = (
@@ -748,246 +141,566 @@ def fit_shape_constrained_call_spline(
     )
 
     if quotes["strike_price"].duplicated().any():
-        raise ValueError(
-            "Duplicate selected strikes found."
+        raise ChainQualityError(
+            "Duplicate selected strikes found. This usually means quotes "
+            "from two settlement conventions were merged into one chain."
         )
 
-    if len(quotes) < 8:
-        raise ValueError(
-            "Too few valid quotes to fit the spline."
-        )
+    return quotes
 
-    observed_x = (
-        quotes["strike_price"].to_numpy(dtype=float)
-        / forward
+
+def pricing_error_scale(
+    spread: np.ndarray,
+    forward: float,
+    discount_factor: float,
+) -> np.ndarray:
+    """Assumed noise on each normalised quote, from its half-spread.
+
+    The floor is expressed as a fraction of the forward rather than in
+    index points, so that it means the same thing at SPX 1200 and SPX 6000.
+    An absolute floor covers the minimum tick.
+    """
+    half_spread = np.asarray(spread, dtype=float) / 2.0
+
+    floor = max(
+        MIN_ERROR_FRACTION_OF_FORWARD * float(forward),
+        MIN_ERROR_ABSOLUTE,
     )
 
-    observed_y = (
-        quotes["call_equivalent_price"].to_numpy(dtype=float)
-        / (discount_factor * forward)
-    )
+    return np.maximum(half_spread, floor) / (discount_factor * forward)
 
-    if use_spread_weights:
-        error_scale = (
-            np.maximum(
-                quotes["spread"].to_numpy(dtype=float) / 2,
-                price_error_floor,
-            )
-            / (discount_factor * forward)
-        )
+
+# --------------------------------------------------------------------------
+# Convex program
+# --------------------------------------------------------------------------
+
+def build_call_spline_program(
+    observed_x: np.ndarray,
+    observed_y: np.ndarray,
+    error_scale: np.ndarray,
+    x_upper: float,
+    n_tail_knots: int = N_TAIL_KNOTS,
+    knot_x: np.ndarray | None = None,
+) -> dict:
+    """Assemble the matrices of the shape-constrained smoothing problem.
+
+    Construction is kept separate from solving so that the spline basis,
+    the roughness quadrature and the constraint set can be verified against
+    an independent solver in the test suite.
+
+    Parameters
+    ----------
+    observed_x, observed_y, error_scale : array_like
+        The data the curve is fitted to, in normalised coordinates.
+    x_upper : float
+        Upper end of the support, in units of the forward.
+    n_tail_knots : int
+        Knots placed in each unobserved tail.
+    knot_x : array_like, optional
+        Strikes at which to place interior knots. Defaults to
+        ``observed_x``, which is Fengler's construction. Supply the full
+        strike set when fitting to a subset, so that holding data out does
+        not also change the function space -- see the module docstring.
+
+    Returns
+    -------
+    dict
+        ``basis_matrix`` (observations by coefficients), ``roughness_matrix``
+        (the Gram matrix of the second-derivative quadrature), the constraint
+        blocks, the knot vector and the breakpoints.
+    """
+    observed_x = np.asarray(observed_x, dtype=float)
+    observed_y = np.asarray(observed_y, dtype=float)
+    error_scale = np.asarray(error_scale, dtype=float)
+
+    if not (observed_x.shape == observed_y.shape == error_scale.shape):
+        raise ValueError("Observations and error scales must have one shape.")
+
+    if np.any(np.diff(observed_x) <= 0):
+        raise ValueError("Observed strikes must be strictly increasing.")
+
+    if knot_x is None:
+        knot_x = observed_x
     else:
-        error_scale = np.ones_like(observed_y)
+        knot_x = np.unique(np.asarray(knot_x, dtype=float))
+        knot_x = knot_x[np.isfinite(knot_x) & (knot_x > 0)]
+        if knot_x.size < 2:
+            raise ValueError("knot_x needs at least two distinct positive values.")
 
-    # Full normalized support: 0 <= S_T/F <= x_upper.
-    x_upper = max(
-        upper_support_multiple,
-        1.05 * observed_x.max(),
+    if x_upper <= max(observed_x.max(), knot_x.max()):
+        raise ValueError("x_upper must exceed the largest observed or knot strike.")
+
+    # Knots in the unobserved tails give the spline enough freedom to meet
+    # the boundary conditions without distorting the traded region.
+    left_tail = np.linspace(0.0, knot_x.min(), n_tail_knots + 2)[1:-1]
+    right_tail = np.linspace(knot_x.max(), x_upper, n_tail_knots + 2)[1:-1]
+
+    internal_knots = np.unique(
+        np.concatenate([left_tail, knot_x, right_tail])
     )
-
-    # Add knots in the unobserved tails so the spline has enough
-    # flexibility to join the market-observed region smoothly.
-    left_tail_knots = np.linspace(
-        0,
-        observed_x.min(),
-        n_tail_knots + 2,
-    )[1:-1]
-
-    right_tail_knots = np.linspace(
-        observed_x.max(),
-        x_upper,
-        n_tail_knots + 2,
-    )[1:-1]
-
-    internal_knots = np.unique(np.concatenate([
-        left_tail_knots,
-        observed_x,
-        right_tail_knots,
-    ]))
-
     internal_knots = internal_knots[
-        (internal_knots > 0)
-        & (internal_knots < x_upper)
+        (internal_knots > 0) & (internal_knots < x_upper)
     ]
 
-    breakpoints = np.concatenate([
-        [0.0],
-        internal_knots,
-        [x_upper],
-    ])
-
-    degree = 3
+    breakpoints = np.concatenate([[0.0], internal_knots, [x_upper]])
 
     knots = np.concatenate([
-        np.repeat(0.0, degree + 1),
+        np.repeat(0.0, DEGREE + 1),
         internal_knots,
-        np.repeat(x_upper, degree + 1),
+        np.repeat(x_upper, DEGREE + 1),
     ])
 
-    n_coefficients = len(knots) - degree - 1
+    n_coefficients = len(knots) - DEGREE - 1
 
-    # Each column is one cubic B-spline basis function.
-    basis = BSpline(
-        knots,
-        np.eye(n_coefficients),
-        degree,
-        extrapolate=False,
-    )
+    basis = BSpline(knots, np.eye(n_coefficients), DEGREE, extrapolate=False)
 
-    observed_basis = basis(observed_x)
+    basis_matrix = basis(observed_x)
     value_basis = basis(breakpoints)
     first_basis = basis.derivative(1)(breakpoints)
     second_basis = basis.derivative(2)(breakpoints)
 
-    # Exact two-point Gaussian quadrature for
-    # integral [g''(x)]² dx.
-    interval_left = breakpoints[:-1]
-    interval_right = breakpoints[1:]
+    # g'' is linear between breakpoints, so its square is quadratic and
+    # two-point Gauss-Legendre integrates it exactly on each interval.
+    left, right = breakpoints[:-1], breakpoints[1:]
+    midpoints = (left + right) / 2
+    half_widths = (right - left) / 2
+    offsets = half_widths / np.sqrt(3.0)
 
-    interval_midpoints = (
-        interval_left + interval_right
-    ) / 2
+    quadrature_points = np.concatenate([midpoints - offsets, midpoints + offsets])
+    quadrature_weights = np.concatenate([half_widths, half_widths])
 
-    interval_half_widths = (
-        interval_right - interval_left
-    ) / 2
+    second_at_quadrature = basis.derivative(2)(quadrature_points)
 
-    offsets = interval_half_widths / np.sqrt(3)
-
-    quadrature_points = np.concatenate([
-        interval_midpoints - offsets,
-        interval_midpoints + offsets,
-    ])
-
-    quadrature_weights = np.concatenate([
-        interval_half_widths,
-        interval_half_widths,
-    ])
-
-    second_quadrature_basis = basis.derivative(2)(
-        quadrature_points
+    roughness_matrix = (
+        second_at_quadrature.T
+        @ (quadrature_weights[:, None] * second_at_quadrature)
     )
+    # Symmetrise away the floating-point asymmetry.
+    roughness_matrix = 0.5 * (roughness_matrix + roughness_matrix.T)
 
-    coefficients = cp.Variable(n_coefficients)
+    intrinsic_values = np.maximum(1.0 - breakpoints, 0.0)
 
-    fitted_observations = (
-        observed_basis @ coefficients
-    )
+    return {
+        "knots": knots,
+        "degree": DEGREE,
+        "breakpoints": breakpoints,
+        "n_coefficients": n_coefficients,
+        "observed_x": observed_x,
+        "observed_y": observed_y,
+        "error_scale": error_scale,
+        "knot_x": knot_x,
+        "basis_matrix": basis_matrix,
+        "value_basis": value_basis,
+        "first_basis": first_basis,
+        "second_basis": second_basis,
+        "roughness_matrix": roughness_matrix,
+        "intrinsic_values": intrinsic_values,
+        "x_upper": float(x_upper),
+    }
+
+
+def _solve_with_cvxpy(program, roughness_penalty):
+    import cvxpy as cp
+
+    coefficients = cp.Variable(program["n_coefficients"])
 
     standardized_errors = cp.multiply(
-        1 / error_scale,
-        fitted_observations - observed_y,
+        1.0 / program["error_scale"],
+        program["basis_matrix"] @ coefficients - program["observed_y"],
     )
 
-    data_loss = (
-        cp.sum_squares(standardized_errors)
-        / len(observed_y)
+    # Fengler's objective in sum form. Averaging the data term instead
+    # would make a chain with three hundred strikes carry no more weight
+    # against the penalty than one with thirty, which over-smooths the
+    # later years of the sample relative to the earlier ones. The
+    # consequence for cross-validation -- that a fold fitted to 80% of the
+    # quotes feels an effectively larger penalty -- is handled by scaling
+    # the penalty in ``selection.cross_validate_chain``.
+    data_loss = cp.sum_squares(standardized_errors)
+    roughness = cp.quad_form(
+        coefficients, cp.psd_wrap(program["roughness_matrix"])
     )
 
-    roughness = cp.sum(
-        cp.multiply(
-            quadrature_weights,
-            cp.square(
-                second_quadrature_basis @ coefficients
-            ),
-        )
-    )
+    # Both solvers consume the same constraint description, so the
+    # reference solver in the tests is checking this exact program.
+    matrix, lower, upper = constraint_bounds(program)
+    constrained = matrix @ coefficients
 
-    fitted_values = value_basis @ coefficients
-    fitted_slopes = first_basis @ coefficients
-    fitted_second = second_basis @ coefficients
-
-    intrinsic_values = np.maximum(
-        1 - breakpoints,
-        0,
-    )
+    finite_lower = np.isfinite(lower)
+    finite_upper = np.isfinite(upper)
 
     constraints = [
-        # Complete-distribution boundary conditions.
-        fitted_values[0] == 1,
-        fitted_slopes[0] == -1,
-
-        fitted_values[-1] == 0,
-        fitted_slopes[-1] == 0,
-
-        # Natural boundaries make the density vanish smoothly.
-        fitted_second[0] == 0,
-        fitted_second[-1] == 0,
-
-        # Nonnegative Breeden-Litzenberger density.
-        fitted_second >= 0,
-
-        # These are theoretically implied by the preceding constraints,
-        # but including them improves numerical robustness.
-        fitted_slopes >= -1,
-        fitted_slopes <= 0,
-        fitted_values >= intrinsic_values,
-        fitted_values <= 1,
+        constrained[finite_lower] >= lower[finite_lower],
+        constrained[finite_upper] <= upper[finite_upper],
     ]
 
     problem = cp.Problem(
-        cp.Minimize(
-            data_loss
-            + roughness_penalty * roughness
-        ),
-        constraints,
+        cp.Minimize(data_loss + roughness_penalty * roughness), constraints
     )
-
     problem.solve(solver=cp.CLARABEL)
 
-    if problem.status not in {
-        cp.OPTIMAL,
-        cp.OPTIMAL_INACCURATE,
-    }:
-        raise RuntimeError(
-            f"Spline optimization failed: {problem.status}"
+    if problem.status not in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}:
+        raise SolverError(f"Spline optimisation failed: {problem.status}")
+
+    return (
+        np.asarray(coefficients.value).ravel(),
+        str(problem.status),
+        float(problem.value),
+    )
+
+
+def constraint_bounds(program: dict):
+    """Express every shape restriction as ``lower <= A c <= upper``.
+
+    Stacking the value, slope and curvature blocks in this form keeps the
+    boundary equalities and the interior inequalities in one place, which
+    is what both solvers and the tests consume.
+    """
+    values = program["value_basis"]
+    slopes = program["first_basis"]
+    second = program["second_basis"]
+
+    n = len(program["breakpoints"])
+    infinity = np.inf
+
+    value_lower = program["intrinsic_values"].astype(float).copy()
+    value_upper = np.ones(n)
+    value_lower[0] = value_upper[0] = 1.0      # g(0) = 1
+    value_lower[-1] = value_upper[-1] = 0.0    # g(x_upper) = 0
+
+    slope_lower = np.full(n, -1.0)
+    slope_upper = np.zeros(n)
+    slope_lower[0] = slope_upper[0] = -1.0     # g'(0) = -1
+    slope_lower[-1] = slope_upper[-1] = 0.0    # g'(x_upper) = 0
+
+    second_lower = np.zeros(n)                 # non-negative density
+    second_upper = np.full(n, infinity)
+    second_upper[0] = 0.0                      # g''(0) = 0
+    second_upper[-1] = 0.0                     # g''(x_upper) = 0
+
+    matrix = np.vstack([values, slopes, second])
+    lower = np.concatenate([value_lower, slope_lower, second_lower])
+    upper = np.concatenate([value_upper, slope_upper, second_upper])
+
+    return matrix, lower, upper
+
+
+def _quadratic_terms(program, roughness_penalty):
+    """Return ``P``, ``q`` for the objective ``0.5 c'Pc + q'c``."""
+    weight = 1.0 / program["error_scale"]
+    design = program["basis_matrix"] * weight[:, None]
+    target = program["observed_y"] * weight
+
+    hessian = 2.0 * (
+        design.T @ design + roughness_penalty * program["roughness_matrix"]
+    )
+    linear = -2.0 * (design.T @ target)
+    constant = float(target @ target)
+
+    return hessian, linear, constant
+
+
+def _solve_with_scipy(
+    program,
+    roughness_penalty,
+    sigma=1e-9,
+    relaxation=1.6,
+    iterations=20000,
+    tolerance=1e-9,
+):
+    """Reference solver used when cvxpy is not installed.
+
+    A compact ADMM solver for ``min 0.5 c'Pc + q'c`` subject to
+    ``l <= Ac <= u``, which is exactly the program the cvxpy path hands to
+    CLARABEL. It needs nothing beyond NumPy and SciPy, so the whole
+    pipeline -- including the end-to-end density-recovery test -- can run in
+    a bare environment. cvxpy remains the production path: this is slower
+    and less accurate on chains with several hundred strikes.
+
+    The objective is rescaled to unit norm before solving, because the
+    standardised pricing errors are divided by half-spreads of order
+    1e-4 while the constraint rows are of order one; without that the
+    penalty parameter cannot serve both.
+    """
+    from scipy.linalg import cho_factor, cho_solve
+
+    hessian, linear, constant = _quadratic_terms(program, roughness_penalty)
+    matrix, lower, upper = constraint_bounds(program)
+
+    scale = float(np.max(np.abs(hessian))) or 1.0
+    hessian, linear = hessian / scale, linear / scale
+
+    # Row-equilibrate the constraints. Curvature rows carry entries of
+    # order 1/h^2 in the knot spacing while value rows are of order one,
+    # and a single penalty parameter cannot serve both scales at once.
+    row_scale = np.maximum(np.max(np.abs(matrix), axis=1), 1e-12)
+    matrix = matrix / row_scale[:, None]
+    lower = np.where(np.isfinite(lower), lower / row_scale, lower)
+    upper = np.where(np.isfinite(upper), upper / row_scale, upper)
+
+    n = hessian.shape[0]
+    m = matrix.shape[0]
+    gram = matrix.T @ matrix
+
+    rho = 1.0
+    factor = cho_factor(hessian + sigma * np.eye(n) + rho * gram)
+
+    c = np.zeros(n)
+    z = np.zeros(m)
+    y = np.zeros(m)
+
+    primal = dual = np.inf
+
+    for iteration in range(1, iterations + 1):
+        candidate = cho_solve(factor, sigma * c - linear + matrix.T @ (rho * z - y))
+        c = candidate
+
+        constrained = matrix @ c
+        relaxed = relaxation * constrained + (1.0 - relaxation) * z
+
+        z_previous = z
+        z = np.clip(relaxed + y / rho, lower, upper)
+        y = y + rho * (relaxed - z)
+
+        primal = float(np.max(np.abs(constrained - z)))
+        dual = float(rho * np.max(np.abs(matrix.T @ (z - z_previous))))
+
+        if primal < tolerance and dual < tolerance:
+            break
+
+        # Keep the two residuals within an order of magnitude of each other.
+        if iteration % 100 == 0:
+            if primal > 10 * dual:
+                rho = min(rho * 5.0, 1e8)
+            elif dual > 10 * primal:
+                rho = max(rho / 5.0, 1e-8)
+            else:
+                continue
+            factor = cho_factor(hessian + sigma * np.eye(n) + rho * gram)
+
+    if primal > 1e-6:
+        raise SolverError(
+            f"Reference solver did not converge (primal residual {primal:.2e})."
         )
 
-    normalized_spline = BSpline(
-        knots,
-        np.asarray(coefficients.value).ravel(),
-        degree,
-        extrapolate=False,
+    objective = float(
+        scale * (0.5 * c @ hessian @ c + linear @ c) + constant
+    )
+    return c, "optimal", objective
+
+
+def solve_call_spline_program(
+    program: dict,
+    roughness_penalty: float = ROUGHNESS_PENALTY,
+    solver: str = "auto",
+):
+    """Solve an assembled program and return coefficients and solver status.
+
+    ``solver`` may be ``"cvxpy"``, ``"scipy"`` or ``"auto"``, which prefers
+    cvxpy and falls back to the SciPy reference solver if it is not
+    installed.
+    """
+    if roughness_penalty < 0:
+        raise ValueError("roughness_penalty must be non-negative.")
+
+    if solver == "cvxpy":
+        return _solve_with_cvxpy(program, roughness_penalty)
+    if solver == "scipy":
+        return _solve_with_scipy(program, roughness_penalty)
+    if solver != "auto":
+        raise ValueError("solver must be 'cvxpy', 'scipy' or 'auto'.")
+
+    try:
+        import cvxpy  # noqa: F401
+    except ImportError:
+        return _solve_with_scipy(program, roughness_penalty)
+    return _solve_with_cvxpy(program, roughness_penalty)
+
+
+# --------------------------------------------------------------------------
+# Public fitting entry point
+# --------------------------------------------------------------------------
+
+def fit_shape_constrained_call_spline(
+    chain: pd.DataFrame,
+    forward: float | None = None,
+    risk_free_rate: float | None = None,
+    roughness_penalty: float = ROUGHNESS_PENALTY,
+    upper_support_multiple: float = UPPER_SUPPORT_MULTIPLE,
+    n_tail_knots: int = N_TAIL_KNOTS,
+    quotes: pd.DataFrame | None = None,
+    knot_strikes=None,
+    solver: str = "auto",
+) -> dict:
+    """Fit the complete shape-constrained call-price curve for one chain.
+
+    Parameters
+    ----------
+    chain : pandas.DataFrame
+        Quotes for one observation date and one expiration.
+    forward, risk_free_rate : float, optional
+        Supply both to reuse an estimate rather than recomputing it. Passing
+        them is the normal path inside loops, where the parity fit has
+        already been done once for the chain.
+    roughness_penalty : float
+        Weight on Fengler's penalty. Defaults to the value in ``config``,
+        which is set by cross-validation rather than by inspection.
+    upper_support_multiple : float
+        The fitted distribution is supported on ``[0, this * F]``.
+    quotes : pandas.DataFrame, optional
+        Pre-selected quotes, used by the cross-validation routine to hold
+        strikes out. Defaults to every out-of-the-money quote in the chain.
+    knot_strikes : array_like, optional
+        Strikes (in index points, not normalised) at which to place the
+        spline's interior knots. Defaults to the strikes in ``quotes``.
+        Cross-validation supplies the *full* strike set here while passing
+        a training subset as ``quotes``, so that holding data out does not
+        also shrink the basis.
+
+    Returns
+    -------
+    dict
+        The fitted ``spline`` along with the forward, discount factor,
+        breakpoints, the quotes used with fitted prices and residuals, and
+        solver diagnostics including ``solver_inaccurate``.
+    """
+    if upper_support_multiple <= 1:
+        raise ValueError("upper_support_multiple must exceed 1.")
+    if n_tail_knots < 0:
+        raise ValueError("n_tail_knots must be non-negative.")
+
+    if forward is None or risk_free_rate is None:
+        estimates, _ = estimate_forward_and_rate(chain)
+        forward = estimates["forward"] if forward is None else forward
+        risk_free_rate = (
+            estimates["risk_free_rate"] if risk_free_rate is None
+            else risk_free_rate
+        )
+
+    forward = float(forward)
+    risk_free_rate = float(risk_free_rate)
+
+    if not np.isfinite(forward) or forward <= 0:
+        raise ChainQualityError("Forward must be finite and positive.")
+
+    time_values = chain["time_to_expiry_years"].dropna().unique()
+    if len(time_values) != 1:
+        raise ChainQualityError("Expected one time-to-expiry value.")
+
+    time_to_expiry = float(time_values[0])
+    if not np.isfinite(time_to_expiry) or time_to_expiry <= 0:
+        raise ChainQualityError("Time to expiry must be finite and positive.")
+
+    discount_factor = float(np.exp(-risk_free_rate * time_to_expiry))
+
+    if quotes is None:
+        quotes = select_call_equivalent_quotes(chain, forward, discount_factor)
+    quotes = quotes.reset_index(drop=True)
+
+    if len(quotes) < MIN_QUOTES_FOR_SPLINE:
+        raise InsufficientQuotesError(
+            f"{len(quotes)} usable quotes; {MIN_QUOTES_FOR_SPLINE} required."
+        )
+
+    observed_x = quotes["strike_price"].to_numpy(dtype=float) / forward
+    observed_y = (
+        quotes["call_equivalent_price"].to_numpy(dtype=float)
+        / (discount_factor * forward)
+    )
+    error_scale = pricing_error_scale(
+        quotes["spread"].to_numpy(dtype=float), forward, discount_factor
     )
 
+    if knot_strikes is None:
+        knot_x = observed_x
+    else:
+        knot_x = np.asarray(knot_strikes, dtype=float) / forward
+
+    x_upper = max(
+        upper_support_multiple,
+        1.05 * observed_x.max(),
+        1.05 * float(np.max(knot_x)),
+    )
+
+    program = build_call_spline_program(
+        observed_x, observed_y, error_scale, x_upper, n_tail_knots,
+        knot_x=knot_x,
+    )
+
+    coefficients, status, objective_value = solve_call_spline_program(
+        program, roughness_penalty, solver=solver
+    )
+
+    spline = BSpline(
+        program["knots"], coefficients, DEGREE, extrapolate=False
+    )
+
+    quotes = quotes.copy()
     quotes["fitted_call_price"] = (
-        discount_factor
-        * forward
-        * normalized_spline(observed_x)
+        discount_factor * forward * spline(observed_x)
+    )
+    quotes["pricing_residual"] = (
+        quotes["fitted_call_price"] - quotes["call_equivalent_price"]
+    )
+    quotes["standardized_residual"] = (
+        quotes["pricing_residual"].to_numpy(dtype=float)
+        / (error_scale * discount_factor * forward)
     )
 
-    quotes["pricing_residual"] = (
-        quotes["fitted_call_price"]
-        - quotes["call_equivalent_price"]
-    )
+    # Probability mass outside the traded strike range is extrapolation,
+    # not measurement, so it is reported rather than buried.
+    cdf_at = lambda x: 1.0 + float(spline.derivative(1)(x))
+    mass_below_traded = cdf_at(observed_x.min())
+    mass_above_traded = 1.0 - cdf_at(observed_x.max())
 
     return {
-        "spline": normalized_spline,
+        "spline": spline,
         "forward": forward,
         "risk_free_rate": risk_free_rate,
         "discount_factor": discount_factor,
         "time_to_expiry": time_to_expiry,
-        "x_upper": x_upper,
-        "breakpoints": breakpoints,
+        "x_upper": program["x_upper"],
+        "breakpoints": program["breakpoints"],
         "quotes": quotes,
-        "objective_value": float(problem.value),
-        "solver_status": problem.status,
+        "n_quotes": int(len(quotes)),
+        "n_knots": int(program["n_coefficients"]),
+        "roughness_penalty": float(roughness_penalty),
+        "strike_bounds": (
+            float(observed_x.min() * forward),
+            float(observed_x.max() * forward),
+        ),
+        "mass_below_traded": float(mass_below_traded),
+        "mass_above_traded": float(mass_above_traded),
+        "extrapolated_mass": float(mass_below_traded + mass_above_traded),
+        "objective_value": float(objective_value),
+        "solver_status": status,
+        "solver_inaccurate": "inaccurate" in str(status).lower(),
     }
-
-
-
-
 
 
 def construct_risk_neutral_distribution_from_spline(
     fit: dict,
-    n_grid: int = 1000,
+    n_grid: int = DENSITY_GRID_POINTS,
+    strike_grid=None,
 ) -> dict:
-    """
-    Evaluate call prices, the risk-neutral PDF and CDF from a fitted spline.
+    """Evaluate call prices, the risk-neutral density and CDF from a fit.
 
-    Returns a probability distribution and some information about it.
-    """
+    The returned ``mass`` and ``mean`` are diagnostics, not corrections:
+    the constraint set makes them exactly one and exactly the forward, so a
+    departure indicates a solver problem rather than something to normalise
+    away.
 
+    Parameters
+    ----------
+    strike_grid : array_like, optional
+        Tabulate on this grid rather than on a linspace merged with the
+        breakpoints. Pass ``evaluation.common_strike_grid(...)`` so that
+        this fit and the implied-volatility baseline are scored on
+        identical abscissae -- before the exact quadrature in
+        ``evaluation.crps_from_cdf``, merging the breakpoints in here while
+        the baseline used a plain linspace was worth about half a per cent
+        of the score on its own.
+    """
     if n_grid < 2:
         raise ValueError("n_grid must be at least 2.")
 
@@ -995,12 +708,19 @@ def construct_risk_neutral_distribution_from_spline(
     forward = fit["forward"]
     discount_factor = fit["discount_factor"]
     x_upper = fit["x_upper"]
-    breakpoints = fit["breakpoints"]
 
-    x_grid = np.unique(np.concatenate([
-        np.linspace(0, x_upper, n_grid),
-        breakpoints,
-    ]))
+    if strike_grid is None:
+        x_grid = np.unique(np.concatenate([
+            np.linspace(0.0, x_upper, n_grid),
+            fit["breakpoints"],
+        ]))
+    else:
+        strike_grid = np.asarray(strike_grid, dtype=float)
+        x_grid = np.unique(strike_grid / forward)
+        # The spline does not extrapolate, so clip to its support. The
+        # boundary conditions make the density zero at both ends anyway.
+        x_grid = x_grid[(x_grid >= 0.0) & (x_grid <= x_upper)]
+        x_grid = np.unique(np.concatenate([[0.0], x_grid, [x_upper]]))
 
     strike_grid = forward * x_grid
 
@@ -1008,43 +728,30 @@ def construct_risk_neutral_distribution_from_spline(
     first_derivative = spline.derivative(1)(x_grid)
     second_derivative = spline.derivative(2)(x_grid)
 
-    call_prices = (
-        discount_factor
-        * forward
-        * normalized_prices
-    )
+    call_prices = discount_factor * forward * normalized_prices
 
-    # Breeden-Litzenberger:
-    #
-    # f_Q(K) = C''(K) / D = g''(K/F) / F
+    # Breeden-Litzenberger in normalised coordinates.
     density = second_derivative / forward
+    cdf = 1.0 + first_derivative
 
-    # F_Q(K) = 1 + C'(K)/D = 1 + g'(K/F)
-    cdf = 1 + first_derivative
-
-    numerical_mass = np.trapezoid(
-        density,
-        strike_grid,
-    )
-
-    numerical_mean = np.trapezoid(
-        strike_grid * density,
-        strike_grid,
-    )
+    # The solver returns tiny negative values and a CDF a hair outside
+    # [0, 1]; clipping those is numerical tidying, not reshaping.
+    density = np.maximum(density, 0.0)
+    cdf = np.clip(cdf, 0.0, 1.0)
 
     return {
         "strike_grid": strike_grid,
         "call_prices": call_prices,
         "density": density,
         "cdf": cdf,
-        "mass": float(numerical_mass),
-        "mean": float(numerical_mean),
-        "minimum_density": float(density.min()),
+        "forward": forward,
+        "mass": float(np.trapezoid(density, strike_grid)),
+        "mean": float(np.trapezoid(strike_grid * density, strike_grid)),
+        "minimum_density": float(np.min(second_derivative / forward)),
         "cdf_start": float(cdf[0]),
         "cdf_end": float(cdf[-1]),
-        "support": (
-            0.0,
-            forward * x_upper,
-        ),
+        "mass_below_traded": fit.get("mass_below_traded"),
+        "mass_above_traded": fit.get("mass_above_traded"),
+        "strike_bounds": fit.get("strike_bounds"),
+        "support": (0.0, forward * x_upper),
     }
-

@@ -1,10 +1,37 @@
-from scipy.optimize import brentq
-from scipy.stats import norm
+"""Black's formula for options on a forward, and its inversion.
+
+The forward-based parameterisation is used throughout because the forward
+inferred from put-call parity already carries the expected dividends and
+financing costs of the index, so no separate dividend model is needed.
+
+All functions accept scalars or arrays and broadcast.
+
+Unchanged from v3 apart from this note.
+"""
+
+from __future__ import annotations
+
 import numpy as np
-import datetime
-from dateutil.tz import tzutc
+from scipy.stats import norm
+
+__all__ = [
+    "black_call_price",
+    "black_put_price",
+    "black_vega",
+    "implied_volatility_call",
+]
 
 
+def _d1_d2(forward, strike, volatility, time_to_expiry):
+    """Return d1, d2 and sigma*sqrt(T), with zero-volatility handled."""
+    sigma_root_t = volatility * np.sqrt(time_to_expiry)
+
+    # Guard the division; the degenerate branch is patched by the caller.
+    safe = np.where(sigma_root_t > 0, sigma_root_t, 1.0)
+
+    d1 = (np.log(forward / strike) + 0.5 * sigma_root_t**2) / safe
+    d2 = d1 - sigma_root_t
+    return d1, d2, sigma_root_t
 
 
 def black_call_price(
@@ -14,364 +41,222 @@ def black_call_price(
     time_to_expiry,
     risk_free_rate,
 ):
-    """
-    Calculate the price of a European call option using Black's formula.
+    """Present value of a European call under Black's formula.
 
-    This forward-based form is useful for SPX options because the inferred
-    forward price already incorporates expected dividends and financing costs.
-
-    Currently this is set up to take floats only, but I should check again later
-    to see if we could get some improvement by vectorizing.
+    ``C = D * [F * N(d1) - K * N(d2)]``, with ``D = exp(-r * T)`` the
+    continuously compounded discount factor.
 
     Parameters
     ----------
-    forward : float
-        Forward price of the underlying for the given expiration.
-    strike : float
-        Option strike price.
-    volatility : float
-        Annualized implied volatility as a decimal, e.g. 0.20 for 20%.
-    time_to_expiry : float
-        Time until expiration in years.
-    risk_free_rate : float
-        The risk-free interest rate.
+    forward, strike, volatility, time_to_expiry, risk_free_rate : array_like
+        Broadcastable. Volatility is annualised and expressed as a decimal;
+        time to expiry is in years.
 
     Returns
     -------
-    float
-        Present value of the European call option.
-
-    Notes
-    -----
-    The pricing formula is
-
-        C = D * [F * N(d1) - K * N(d2)]
-
-    where D is the discount factor, F is the forward price, K is strike,
-    N is a normal distribution, and d1, d2 are computed below.
-    We assume that interest is continuously compounded when calculating
-    the discount factor
+    numpy.ndarray or float
+        Discounted call value. A zero volatility returns the discounted
+        intrinsic value.
     """
+    forward, strike, volatility, time_to_expiry, risk_free_rate = np.broadcast_arrays(
+        *(np.asarray(a, dtype=float)
+          for a in (forward, strike, volatility, time_to_expiry, risk_free_rate))
+    )
 
-    if forward <= 0 or strike <= 0:
+    if np.any(forward <= 0) or np.any(strike <= 0):
         raise ValueError("Forward and strike must be positive.")
-    if volatility < 0:
+    if np.any(volatility < 0):
         raise ValueError("Volatility must be non-negative.")
-    if time_to_expiry <= 0:
+    if np.any(time_to_expiry <= 0):
         raise ValueError("Time to expiry must be positive.")
 
-    volatility_sqrt_t = volatility * np.sqrt(time_to_expiry)
     discount_factor = np.exp(-risk_free_rate * time_to_expiry)
+    d1, d2, sigma_root_t = _d1_d2(forward, strike, volatility, time_to_expiry)
 
-    if volatility == 0:
-        return discount_factor * max(forward - strike, 0.0)
-
-    d1 = (
-        np.log(forward / strike)
-        + 0.5 * volatility**2 * time_to_expiry
-    ) / volatility_sqrt_t
-    d2 = d1 - volatility_sqrt_t
-
-    return discount_factor * (
-        forward * norm.cdf(d1)
-        - strike * norm.cdf(d2)
+    value = discount_factor * (
+        forward * norm.cdf(d1) - strike * norm.cdf(d2)
     )
+
+    intrinsic = discount_factor * np.maximum(forward - strike, 0.0)
+    value = np.where(sigma_root_t > 0, value, intrinsic)
+
+    return value if value.ndim else float(value)
+
 
 def black_put_price(
     forward,
     strike,
     volatility,
     time_to_expiry,
-    risk_free_rate
+    risk_free_rate,
 ):
+    """Present value of a European put under Black's formula.
+
+    ``P = D * [K * N(-d2) - F * N(-d1)]``.
     """
-    Calculate the price of a European put option using Black's formula.
-
-    This forward-based form is useful for SPX options because the inferred
-    forward price already incorporates expected dividends and financing costs.
-
-    Currently this is set up to take floats only, but I should check again later
-    to see if we could get some improvement by vectorizing.
-
-    Parameters
-    ----------
-    forward : float
-        Forward price of the underlying for the given expiration.
-    strike : float
-        Option strike price.
-    volatility : float
-        Annualized implied volatility as a decimal, e.g. 0.20 for 20%.
-    time_to_expiry : float
-        Time until expiration in years.
-    risk_free_rate : float
-        The risk-free interest rate.
-
-    Returns
-    -------
-    float
-        Present value of the European put option.
-
-    Notes
-    -----
-    The pricing formula is
-
-        P = D * [K * N(-d2) - F * N(-d1)]
-
-    where D is the discount factor, F is the forward price, K is strike,
-    N is a normal distribution, and d1, d2 are computed below.
-    We assume that interest is continuously compounded when calculating
-    the discount factor
-    """
-
-    if forward <= 0 or strike <= 0:
-        raise ValueError("Forward and strike must be positive.")
-    if volatility < 0:
-        raise ValueError("Volatility must be non-negative.")
-    if time_to_expiry <= 0:
-        raise ValueError("Time to expiry must be positive.")
-
-    volatility_sqrt_t = volatility * np.sqrt(time_to_expiry)
-    discount_factor = np.exp(-risk_free_rate * time_to_expiry)
-
-    if volatility == 0:
-        return discount_factor * max(strike - forward, 0.0)
-
-
-    d1 = (
-        np.log(forward / strike)
-        + 0.5 * volatility**2 * time_to_expiry
-    ) / volatility_sqrt_t
-    d2 = d1 - volatility_sqrt_t
-
-    return discount_factor * (
-        strike * norm.cdf(-d2)
-        - forward * norm.cdf(-d1)
+    forward, strike, volatility, time_to_expiry, risk_free_rate = np.broadcast_arrays(
+        *(np.asarray(a, dtype=float)
+          for a in (forward, strike, volatility, time_to_expiry, risk_free_rate))
     )
 
-        
+    if np.any(forward <= 0) or np.any(strike <= 0):
+        raise ValueError("Forward and strike must be positive.")
+    if np.any(volatility < 0):
+        raise ValueError("Volatility must be non-negative.")
+    if np.any(time_to_expiry <= 0):
+        raise ValueError("Time to expiry must be positive.")
+
+    discount_factor = np.exp(-risk_free_rate * time_to_expiry)
+    d1, d2, sigma_root_t = _d1_d2(forward, strike, volatility, time_to_expiry)
+
+    value = discount_factor * (
+        strike * norm.cdf(-d2) - forward * norm.cdf(-d1)
+    )
+
+    intrinsic = discount_factor * np.maximum(strike - forward, 0.0)
+    value = np.where(sigma_root_t > 0, value, intrinsic)
+
+    return value if value.ndim else float(value)
+
+
+def black_vega(
+    forward,
+    strike,
+    volatility,
+    time_to_expiry,
+    risk_free_rate,
+):
+    """Sensitivity of the option value to volatility.
+
+    ``dC/dsigma = D * F * phi(d1) * sqrt(T)``, identical for calls and puts.
+    Used to convert a quoted bid-ask spread into a volatility-space noise
+    estimate.
+    """
+    forward, strike, volatility, time_to_expiry, risk_free_rate = np.broadcast_arrays(
+        *(np.asarray(a, dtype=float)
+          for a in (forward, strike, volatility, time_to_expiry, risk_free_rate))
+    )
+
+    discount_factor = np.exp(-risk_free_rate * time_to_expiry)
+    d1, _, _ = _d1_d2(forward, strike, volatility, time_to_expiry)
+
+    value = discount_factor * forward * norm.pdf(d1) * np.sqrt(time_to_expiry)
+    return value if value.ndim else float(value)
+
+
 def implied_volatility_call(
     market_price,
     forward,
     strike,
     time_to_expiry,
     risk_free_rate,
-    volatility_bounds=(1e-7, 20.0),
+    volatility_bounds=(1e-7, 5.0),
+    tolerance=1e-10,
+    max_iterations=80,
 ):
-    """
-    Calculate the Black implied volatility of a European call option.
-    Uses brentq for numerical inversion.
+    """Black implied volatility of a European call, inverted numerically.
+
+    The Black price is strictly increasing in volatility, so a vectorised
+    bisection converges monotonically for every element at once. This
+    replaces the previous per-quote ``brentq`` loop, which dominated the
+    runtime of the implied-volatility baseline.
+
+    Quotes that violate the no-arbitrage price bounds
+    ``D * max(F - K, 0) <= C < D * F`` return ``nan``; a price exactly at
+    the lower bound returns zero.
 
     Parameters
     ----------
-    market_price : float
-        Observed call price, normally the bid-ask midpoint.
-    forward : float
-        Market-implied forward level for the option's expiration.
-    strike : float
-        Option strike price.
-    time_to_expiry : float
-        Time until expiration in years.
-    risk_free_rate : float
-        Annualized continuously compounded risk-free rate, expressed as a
-        decimal; for example, 0.05 represents 5%.
-    volatility_bounds : tuple[float, float], optional
-        Lower and upper volatility bounds used by the root finder.
+    market_price, forward, strike, time_to_expiry, risk_free_rate : array_like
+        Broadcastable inputs.
+    volatility_bounds : tuple[float, float]
+        Bracketing interval for the search.
+    tolerance : float
+        Absolute width of the bracket at which the search stops.
+    max_iterations : int
+        Bisection steps. Eighty halvings take the default bracket below
+        1e-16, so the tolerance binds first in practice.
 
     Returns
     -------
-    float
-        Annualized implied volatility. Returns ``np.nan`` if the inputs
-        violate Black's price bounds or the volatility is not bracketed.
+    numpy.ndarray or float
+        Annualised implied volatility, or ``nan`` where not identified.
     """
-    inputs = [
-        market_price,
-        forward,
-        strike,
-        time_to_expiry,
-        risk_free_rate,
-    ]
-
-    if not np.all(np.isfinite(inputs)):
-        return np.nan
-
-    if forward <= 0 or strike <= 0 or time_to_expiry <= 0:
-        return np.nan
-
-    discount_factor = np.exp(
-        -risk_free_rate * time_to_expiry
+    scalar_input = all(
+        np.isscalar(a) or np.ndim(a) == 0
+        for a in (market_price, forward, strike, time_to_expiry, risk_free_rate)
     )
 
-    minimum_price = discount_factor * max(forward - strike, 0.0)
+    market_price, forward, strike, time_to_expiry, risk_free_rate = (
+        np.broadcast_arrays(
+            *(np.asarray(a, dtype=float)
+              for a in (market_price, forward, strike,
+                        time_to_expiry, risk_free_rate))
+        )
+    )
+
+    lower_bound, upper_bound = volatility_bounds
+    if not 0 < lower_bound < upper_bound:
+        raise ValueError("Volatility bounds must satisfy 0 < lower < upper.")
+
+    finite = (
+        np.isfinite(market_price)
+        & np.isfinite(forward)
+        & np.isfinite(strike)
+        & np.isfinite(time_to_expiry)
+        & np.isfinite(risk_free_rate)
+    )
+
+    usable = finite & (forward > 0) & (strike > 0) & (time_to_expiry > 0)
+
+    discount_factor = np.where(
+        usable, np.exp(-risk_free_rate * time_to_expiry), 1.0
+    )
+
+    minimum_price = discount_factor * np.maximum(forward - strike, 0.0)
     maximum_price = discount_factor * forward
 
-    if market_price < minimum_price or market_price >= maximum_price:
-        return np.nan
-
-    if np.isclose(market_price, minimum_price, atol=1e-12, rtol=0):
-        return 0.0
-
-    def objective(volatility):
-        return black_call_price(
-            forward=forward,
-            strike=strike,
-            volatility=volatility,
-            time_to_expiry=time_to_expiry,
-            risk_free_rate=risk_free_rate,
-        ) - market_price
-
-    lower_volatility, upper_volatility = volatility_bounds
-
-    if not 0 < lower_volatility < upper_volatility:
-        raise ValueError(
-            "Volatility bounds must satisfy 0 < lower < upper."
-        )
-
-    if objective(lower_volatility) > 0:
-        return np.nan
-
-    if objective(upper_volatility) < 0:
-        return np.nan
-
-    return brentq(
-        objective,
-        lower_volatility,
-        upper_volatility,
-        xtol=1e-10,
-        maxiter=100,
+    # An option worth its intrinsic value to within a rounding error of
+    # the discounted forward carries no volatility information. The
+    # tolerance is relative to the index level rather than absolute, so
+    # that it means the same thing at SPX 1200 and SPX 6000.
+    at_lower_bound = usable & (
+        np.abs(market_price - minimum_price) <= 1e-12 * maximum_price
     )
 
+    in_range = (
+        usable
+        & (market_price >= minimum_price)
+        & (market_price < maximum_price)
+        & ~at_lower_bound
+    )
 
+    # Safe placeholder inputs keep the vectorised pricer away from the
+    # degenerate elements we are going to overwrite anyway.
+    safe_forward = np.where(usable, forward, 1.0)
+    safe_strike = np.where(usable, strike, 1.0)
+    safe_time = np.where(usable, time_to_expiry, 1.0)
 
+    low = np.full(safe_forward.shape, float(lower_bound))
+    high = np.full(safe_forward.shape, float(upper_bound))
 
+    def price_at(volatility):
+        return black_call_price(
+            safe_forward, safe_strike, volatility, safe_time, risk_free_rate
+        )
 
-# =========== ZONE OF DEPRECATION ===================== #
+    # Anything the bracket cannot reach is not identified.
+    bracketed = in_range & (price_at(high) >= market_price)
 
+    for _ in range(max_iterations):
+        if np.all(high - low <= tolerance):
+            break
+        middle = 0.5 * (low + high)
+        too_cheap = price_at(middle) < market_price
+        low = np.where(too_cheap, middle, low)
+        high = np.where(too_cheap, high, middle)
 
+    result = np.where(bracketed, 0.5 * (low + high), np.nan)
+    result = np.where(at_lower_bound, 0.0, result)
 
-# def find_tte_yf_options(
-#         expiration_date,
-#         last_trade_date
-#     ):
-#     '''returns time measured in years as a float between two dates
-    
-#     Inputs:
-#     expiration_date (str): 'YYYY-MM-DD'
-#     last_trade_date (pandas._libs.tslibs.timestamps.Timestamp)
-    
-#     Returns:
-#     Float of time to expiration in years
-#     '''
-#     tte = (datetime.datetime.strptime(expiration_date+'-21-30', "%Y-%m-%d-%H-%M").replace(tzinfo=tzutc()) -\
-#         last_trade_date).total_seconds()/(60*60*24*365)
-    
-#     return tte
-
-
-##Black-Scholes Functions
-# def bs_call(S0, K, sigma, t, r):
-#     '''
-#     Black-Scholes Call Option formula
-    
-#     Inputs:
-#     S0 (float): Stock price at time 0
-#     K (float): Strike Price
-#     sigma: Yearly volatility
-#     t: Time to expiration (years)
-#     r: Risk-free Interest rate
-    
-#     Return:
-#     Black-Scholes value of call option (float)
-#     '''
-    
-#     d1 = (np.log(S0/K) + (r + (0.5)*sigma**2)*t)/(sigma*np.sqrt(t))
-#     d2 = d1 - sigma*np.sqrt(t)
-#     call_value = S0*norm.cdf(d1) - K*np.exp(-r*t)*norm.cdf(d2)
-    
-#     return call_value
-
-
-# def bs_put(S0, K, sigma, t, r):
-#     '''
-#     Black-Scholes Put Option formula
-    
-#     Inputs:
-#     S0 (float): Stock price at time 0
-#     K (float): Strike Price
-#     sigma: Yearly volatility
-#     t: Time to expiration (years)
-#     r: Risk-free Interest rate
-    
-#     Return:
-#     Black-Scholes value of put option (float)
-#     '''
-    
-#     d1 = (np.log(S0/K) + (r + (0.5)*sigma**2)*t)/(sigma*np.sqrt(t))
-#     d2 = d1 - sigma*np.sqrt(t)
-#     put_value = -S0*norm.cdf(-d1) + K*np.exp(-r*t)*norm.cdf(-d2)
-    
-#     return put_value
-
-# def bs_price(S0, K, sigma, t, r, option_type):
-#     if option_type not in ["call", "put"]:
-#         raise ValueError("Invalid option type.")
-#     return bs_call(S0, K, sigma, t, r) if option_type == "call" else bs_put(S0, K, sigma, t, r)
-
-
-
-# def implied_volatility_call(market_price, S0, K, t, r, sigma_bounds=(1e-7, 20)):
-#     """
-#     Returns the implied volatility of a call option given spot price, strike, time to expiration, 
-#     and risk-free-interest rate.
-    
-#     Inputs:
-#     market_price (float): Market price of call option
-#     S0 (float): Spot price of stock
-#     K (float): strike price
-#     t (float): time-to-expiration
-#     r (float): risk-free-interest rate
-    
-#     Returns:
-#     Implied volatility (float)
-#     """
-#     def objective(sigma):
-#         return bs_call(S0, K, sigma, t, r) - market_price
-#     try:
-#         return brentq(objective, *sigma_bounds)
-#     except ValueError:
-#         return np.nan
-    
-
-# def implied_volatility_put(market_price, S0, K, t, r, sigma_bounds=(1e-6, 2)):
-#     """
-#     Returns the implied volatility of a put option given spot price, strike, time to expiration, 
-#     and risk-free-interest rate.
-    
-#     Inputs:
-#     market_price (float):   Market price of call option
-#     S0 (float):             Spot price of stock
-#     K (float):              strike price
-#     t (float):              time-to-expiration
-#     r (float):              risk-free-interest rate
-    
-#     Returns:
-#     Implied volatility (float)
-#     """
-#     def objective(sigma):
-#         return bs_put(S0, K, sigma, t, r) - market_price
-#     try:
-#         return brentq(objective, *sigma_bounds)
-#     except ValueError:
-#         return np.nan
-
-
-# def bs_implied_volatility(option_type, market_price, S0, K, t, r, sigma_bounds=(1e-6, 2)):
-#     """
-#     Simple wrapper to use the other functions to calculate implied volatility for either a call or a put.
-#     """
-#     if option_type not in ["call", "put"]:
-#         raise ValueError("Invalid option type.")
-
-#     if option_type == "call":
-#         return implied_volatility_call(market_price, S0, K, t, r, sigma_bounds)
-#     elif option_type == "put":
-#         return implied_volatility_put(market_price, S0, K, t, r, sigma_bounds)
+    return float(result) if scalar_input else result
