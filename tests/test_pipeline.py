@@ -5,7 +5,11 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from implied_stock_distributions.data_access import iter_chains
+from implied_stock_distributions.data_access import (
+    catalog_path,
+    iter_chains,
+    resolve_parquet_path,
+)
 from implied_stock_distributions.pipeline import score_chain
 from implied_stock_distributions.synthetic import (
     SyntheticMarket,
@@ -22,13 +26,12 @@ def _lognormal_density(grid, volatility=0.16, tau=30 / 365):
     return stats.lognorm.pdf(grid, s=scale, scale=FORWARD * np.exp(-0.5 * scale**2))
 
 
-def test_skewness_is_measured_where_there_are_prices():
-    """A sliver of extrapolated mass near zero must not decide the skewness.
+def test_full_support_skewness_is_dominated_by_extrapolated_mass():
+    """The documented limitation of the full-support log-skewness.
 
     The log-skewness of a lognormal is zero. Add one per cent of mass between
-    0.1 F and 0.3 F -- far below any traded strike -- and the full-support
-    log-skewness becomes hugely negative, while the skewness measured on the
-    traded range is unaffected.
+    0.1 F and 0.3 F -- far below any traded strike -- and the log-skewness
+    becomes strongly negative: the tail, not the traded prices, decides it.
     """
     grid = np.linspace(1.0, 2.5 * FORWARD, 20001)
     clean = _lognormal_density(grid)
@@ -37,13 +40,8 @@ def test_skewness_is_measured_where_there_are_prices():
     sliver /= np.trapezoid(sliver, grid)
     contaminated = 0.99 * clean + 0.01 * sliver
 
-    traded = (0.6 * FORWARD, 1.3 * FORWARD)
-
     assert risk_neutral_skewness(grid, clean) == pytest.approx(0.0, abs=0.01)
     assert risk_neutral_skewness(grid, contaminated) < -5.0
-    assert risk_neutral_skewness(grid, contaminated, support=traded) == (
-        pytest.approx(0.0, abs=0.01)
-    )
 
 
 def _synthetic_chain(seed=1):
@@ -111,3 +109,14 @@ def test_synthetic_dataset_round_trips_through_data_access(tmp_path):
     assert {"expiration_year", "expiration_month", "set_value"} <= set(
         settlement.columns
     )
+
+
+def test_a_relative_path_outside_the_project_is_stored_absolute(tmp_path, monkeypatch):
+    """A relative path is relative to the working directory it was given in,
+    so the catalogue must not hand it to a loader that resolves against the
+    project root."""
+    monkeypatch.chdir(tmp_path)
+    stored = catalog_path("alt/processed/SPX/chain.parquet")
+    expected = tmp_path.resolve() / "alt" / "processed" / "SPX" / "chain.parquet"
+    assert stored == str(expected)
+    assert resolve_parquet_path(stored) == expected

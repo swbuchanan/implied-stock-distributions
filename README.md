@@ -112,7 +112,7 @@ Each expiration is forecast on about twenty-one consecutive trading days, and al
 Differences in mean score are tested with Diebold–Mariano using a Newey–West variance, and with a bootstrap over whole expiration months.
 
 **The outputs are checked against series the pipeline never sees.**
-The short rate and dividend yield implied by the parity regression are compared with FRED and Shiller data, and the risk-neutral skewness on the traded strikes with Cboe's SKEW index.
+The short rate and dividend yield implied by the parity regression are compared with FRED and Shiller data, and the risk-neutral skewness with Cboe's SKEW index (not yet like-for-like; see section 3.1 of the [review](docs/review-2026-11.md)).
 
 ## Sample
 
@@ -131,7 +131,8 @@ Time to expiry is measured to the Thursday close, since the settlement print com
   Fengler's backward pass across maturities, which would make the three horizons mutually consistent, is not implemented.
 - The CRRA parameter is estimated on the same observations used to measure the improvement, so the Part 3 result is an in-sample fit.
 - Every forecast is scored against an index level.
-  Nothing here is yet a trading signal; see the review for what that would take.
+  Nothing here is yet a trading signal; whether any of it is usable in live trading is a separate assessment that has not been done yet.
+  The [review](docs/review-2026-11.md)'s open question on a time-series benchmark is the first step towards it.
 
 ## References
 

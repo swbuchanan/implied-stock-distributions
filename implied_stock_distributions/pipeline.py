@@ -131,10 +131,9 @@ def score_chain(chain, realized_value: float, roughness_penalty: float) -> dict:
         "iv_mean_over_forward": iv_result["mean_over_forward"],
         "n_smile_knots": iv_result["n_smile_knots"],
 
-        # Shape, for the SKEW validation, measured where there are prices.
+        # Shape, for the SKEW validation.
         "risk_neutral_skewness": risk_neutral_skewness(
-            constrained["strike_grid"], constrained["density"],
-            support=fit["strike_bounds"],
+            constrained["strike_grid"], constrained["density"]
         ),
 
         "crps_constrained": constrained_score["crps"],

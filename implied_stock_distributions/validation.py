@@ -343,22 +343,21 @@ def validate_dividend_yield(
 # Risk-neutral skewness against Cboe SKEW
 # --------------------------------------------------------------------------
 
-def risk_neutral_skewness(strike_grid, density, support=None) -> float:
+def risk_neutral_skewness(strike_grid, density) -> float:
     """Skewness of log returns under a tabulated risk-neutral density.
 
     This is the quantity Cboe's SKEW index is a linear function of. Cboe
     estimates it from a portfolio of options directly (Bakshi, Kapadia and
-    Madan, 2003); computing it here from the fitted density instead means
-    agreement between the two is a real test of the recovered *shape*,
-    since nothing in the two calculations is shared.
+    Madan, 2003); computing it here from the fitted density instead shares
+    nothing with that calculation.
 
-    Pass the traded strike range as ``support``. Cboe uses only traded
-    strikes, and on the full support the third log moment is dominated by
-    whatever small amount of mass the fit extrapolates far below the lowest
-    strike (see ``evaluation.distribution_moments``).
+    It is not like-for-like with Cboe's number: the moment is taken over the
+    whole fitted support, so it is dominated by whatever small amount of
+    mass the fit extrapolates far below the lowest strike (see
+    ``evaluation.distribution_moments``).
     """
     try:
-        moments = distribution_moments(strike_grid, density, support=support)
+        moments = distribution_moments(strike_grid, density)
     except ChainQualityError:
         return float("nan")
     return moments["log_skewness"]

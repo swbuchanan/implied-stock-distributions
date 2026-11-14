@@ -57,10 +57,11 @@ def discover_data_files(
 
 def catalog_path(path: Path) -> str:
     """A Parquet path as the catalogue stores it: relative to the project
-    root when the file is inside it, absolute otherwise."""
-    path = Path(path)
+    root when the file is inside it, otherwise absolute (resolved against the
+    current working directory)."""
+    path = Path(path).resolve()
     try:
-        return str(path.resolve().relative_to(PROJECT_ROOT))
+        return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
 

@@ -253,29 +253,19 @@ def probability_integral_transform(strike_grid, cdf, realized_value):
     )
 
 
-def distribution_moments(strike_grid, density, support=None):
+def distribution_moments(strike_grid, density):
     """Mean, standard deviation and log-return moments of a tabulated density.
 
     The log-return moments are taken under the forecast distribution of
     ``log(S_T)``, which is the object the CRRA tilt acts on additively and
     the object Cboe's SKEW index describes.
 
-    ``support`` restricts every moment to ``low <= S_T <= high`` (the density
-    is renormalised there). Pass the traded strike range when the higher
-    log moments matter: ``log(S_T / F)`` is about -2 at ``0.1 F``, so one per
-    cent of extrapolated mass far below the lowest strike is enough to move
-    the log-skewness by several units -- the tail model, not the prices,
-    would then decide the answer. Cboe's SKEW is likewise computed from the
-    traded strikes only.
+    The moments are taken over the whole fitted support. ``log(S_T / F)`` is
+    about -2 at ``0.1 F``, so one per cent of extrapolated mass far below the
+    lowest strike is enough to move the log-skewness by several units: the
+    higher log moments describe the tail model as much as the prices.
     """
     strike_grid, density = _clean_grid(strike_grid, density)
-
-    if support is not None:
-        low, high = support
-        inside = (strike_grid >= low) & (strike_grid <= high)
-        if inside.sum() < 2:
-            raise ChainQualityError("The support holds fewer than two grid points.")
-        strike_grid, density = strike_grid[inside], density[inside]
 
     mass = float(np.trapezoid(density, strike_grid))
     if not np.isfinite(mass) or mass <= 0:
@@ -716,9 +706,7 @@ def crps_location_sensitivity(volatility, time_to_expiry, gammas=(1, 2, 3, 4)):
     return rows
 
 
-def tilt_moment_summary(
-    strike_grid, density, gammas=(1, 2, 3, 4), tilt_range=None, support=None
-):
+def tilt_moment_summary(strike_grid, density, gammas=(1, 2, 3, 4), tilt_range=None):
     """What the tilt does to a density's location, width and skew.
 
     On a lognormal the tilt is pure location. On a realistically
@@ -729,21 +717,18 @@ def tilt_moment_summary(
     risk premium -- and it is the argument for wanting a second parameter
     rather than for wanting a longer sample.
 
-    ``support`` is passed to ``distribution_moments``; give it the traded
-    strike range, or the log-skewness describes the extrapolated tail.
-
     Returns a list of dicts, one per gamma, with the moments and their
     change from the untilted density.
     """
     strike_grid, density = _clean_grid(strike_grid, density)
-    base = distribution_moments(strike_grid, density, support=support)
+    base = distribution_moments(strike_grid, density)
 
     rows = []
     for gamma in (0.0, *gammas):
         tilted = physical_density_from_rn_grid(
             strike_grid, density, gamma, tilt_range=tilt_range
         )
-        moments = distribution_moments(strike_grid, tilted, support=support)
+        moments = distribution_moments(strike_grid, tilted)
         rows.append({
             "gamma": float(gamma),
             "mean": moments["mean"],

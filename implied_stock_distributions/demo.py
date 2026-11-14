@@ -100,7 +100,7 @@ def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=Tr
                 iv_result["strike_grid"], iv_result["density"]
             ),
             "true_risk_neutral_skewness": risk_neutral_skewness(
-                grid, true_density_on(grid), support=result["fit"]["strike_bounds"]
+                grid, true_density_on(grid)
             ),
         })
 
@@ -231,7 +231,7 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
     print(f"  L1 distance, IV smoothing:      "
           f"{scores['l1_error_iv'].mean():.4f} "
           f"(median {scores['l1_error_iv'].median():.4f})")
-    print(f"  Risk-neutral log skewness on the traded strikes: fitted "
+    print(f"  Risk-neutral log skewness: fitted "
           f"{scores['risk_neutral_skewness'].mean():+.3f} vs true "
           f"{scores['true_risk_neutral_skewness'].mean():+.3f}")
 
