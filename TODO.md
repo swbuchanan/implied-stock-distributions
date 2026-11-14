@@ -1,6 +1,4 @@
-
-- vectorize the inversion in the Black-Scholes code; see `scipy.optimize.elementwise.find_rood`
-- maybe we can do better forecast evalution?
+- maybe we can do better forecast evaluation? (see the open questions in `docs/review-2026-11.md`)
 - unit tests for everything
 - handle tails better
 - general optimization of numerics

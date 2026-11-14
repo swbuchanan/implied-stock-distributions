@@ -1,3 +1,16 @@
+"""Locating, cataloguing and loading processed option chains.
+
+The processed data are stored as one Parquet file per month, which is more
+than fits in memory at once. The catalogue records which chains live in
+which file so that an analysis can iterate over chains while holding only
+one month at a time.
+
+Paths in the catalogue are stored relative to the project root, so that a
+catalogue built on one machine still works in another clone.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 import pandas as pd
@@ -7,9 +20,22 @@ from .config import (
     CHAIN_CATALOG_PATH,
     CHAIN_COLUMNS,
     PROJECT_ROOT,
+    SET_VALUES_PATH,
     SPX_PROCESSED_DIR,
 )
 
+__all__ = [
+    "discover_data_files",
+    "build_chain_catalog",
+    "catalog_path",
+    "load_chain_catalog",
+    "resolve_parquet_path",
+    "load_chain",
+    "iter_chains",
+    "load_random_chain",
+    "load_settlement_values",
+    "settlement_lookup",
+]
 
 
 def discover_data_files(
@@ -17,42 +43,42 @@ def discover_data_files(
     years: tuple[int, ...] = ANALYSIS_YEARS,
 ) -> tuple[dict[int, list[Path]], list[Path]]:
     """Locate the monthly Parquet files used in the analysis."""
-
     files_by_year = {
         year: sorted(
-            (data_dir / str(year)).glob(
-                f"spx_options_{year}_[0-9][0-9].parquet"
-            )
+            (data_dir / str(year)).glob(f"spx_options_{year}_[0-9][0-9].parquet")
         )
         for year in years
     }
 
-    files = [
-        path
-        for year_files in files_by_year.values()
-        for path in year_files
-    ]
+    files = [path for year_files in files_by_year.values() for path in year_files]
 
     return files_by_year, files
 
-def build_chain_catalog() -> pd.DataFrame:
-    """
-    Build the chain catalogue from the processed data.
-    """
-    parts = []
 
+def catalog_path(path: Path) -> str:
+    """A Parquet path as the catalogue stores it: relative to the project
+    root when the file is inside it, otherwise absolute (resolved against the
+    current working directory)."""
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def build_chain_catalog() -> pd.DataFrame:
+    """Build the chain catalogue from the processed monthly files."""
+    parts = []
     _, data_files = discover_data_files()
 
-    for path in data_files:
-        chains = (
-            pd.read_parquet(
-                path,
-                columns=CHAIN_COLUMNS,
-            )
-            .drop_duplicates()
+    if not data_files:
+        raise FileNotFoundError(
+            f"No processed monthly files found under {SPX_PROCESSED_DIR}."
         )
 
-        chains["parquet_path"] = str(path)
+    for path in data_files:
+        chains = pd.read_parquet(path, columns=CHAIN_COLUMNS).drop_duplicates()
+        chains["parquet_path"] = catalog_path(path)
         parts.append(chains)
 
     return (
@@ -62,70 +88,44 @@ def build_chain_catalog() -> pd.DataFrame:
     )
 
 
-def load_chain_catalog() -> pd.DataFrame:
+def load_chain_catalog(path: Path = CHAIN_CATALOG_PATH) -> pd.DataFrame:
     """Load the chain catalogue created during preprocessing."""
-
-    if not CHAIN_CATALOG_PATH.exists():
+    if not Path(path).exists():
         raise FileNotFoundError(
-            "Chain catalogue not found. Run preprocessing first: "
-            f"{CHAIN_CATALOG_PATH}"
+            f"Chain catalogue not found. Run preprocessing first: {path}"
         )
-
-    return pd.read_parquet(CHAIN_CATALOG_PATH)
+    return pd.read_parquet(path)
 
 
 def resolve_parquet_path(path_value: str | Path) -> Path:
-    """Resolve paths stored in the catalogue."""
-
+    """Resolve a catalogue path against the project root."""
     path = Path(path_value)
-
-    if path.is_absolute():
-        return path
-
-    return PROJECT_ROOT / path
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def load_chain(info: pd.Series) -> pd.DataFrame:
-    """Load one chain described by a catalogue row."""
-
-    path = resolve_parquet_path(info["parquet_path"])
-    monthly = pd.read_parquet(path)
+    """Load the one chain described by a catalogue row."""
+    monthly = pd.read_parquet(resolve_parquet_path(info["parquet_path"]))
 
     mask = (
         monthly["data_date"].eq(info["data_date"])
-        & monthly["expiration_date"].eq(
-            info["expiration_date"]
-        )
-        & monthly["target_dte_days"].eq(
-            info["target_dte_days"]
-        )
+        & monthly["expiration_date"].eq(info["expiration_date"])
+        & monthly["target_dte_days"].eq(info["target_dte_days"])
     )
 
     chain = monthly.loc[mask].copy()
 
     if chain.empty:
-        raise KeyError("The requested chain was not found")
+        raise KeyError("The requested chain was not found.")
 
-    return chain.sort_values(
-        ["put_call", "strike_price"],
-        ignore_index=True,
-    )
+    return chain.sort_values(["put_call", "strike_price"], ignore_index=True)
 
 
 def iter_chains(catalog: pd.DataFrame):
-    """Iterate through chains while loading each month only once."""
-
-    for stored_path, file_catalog in catalog.groupby(
-        "parquet_path",
-        sort=False,
-    ):
-        path = resolve_parquet_path(stored_path)
-        monthly = pd.read_parquet(path)
-
-        grouped = monthly.groupby(
-            CHAIN_COLUMNS,
-            sort=False,
-        )
+    """Yield ``(key, chain)`` while loading each monthly file only once."""
+    for stored_path, file_catalog in catalog.groupby("parquet_path", sort=False):
+        monthly = pd.read_parquet(resolve_parquet_path(stored_path))
+        grouped = monthly.groupby(CHAIN_COLUMNS, sort=False)
 
         for info in file_catalog.itertuples(index=False):
             key = (
@@ -134,15 +134,17 @@ def iter_chains(catalog: pd.DataFrame):
                 int(info.target_dte_days),
             )
 
-            chain = (
-                grouped.get_group(key)
-                .sort_values(["put_call", "strike_price"])
+            try:
+                chain = grouped.get_group(key)
+            except KeyError:
+                # The catalogue is out of step with the file it points at.
+                continue
+
+            yield key, (
+                chain.sort_values(["put_call", "strike_price"])
                 .reset_index(drop=True)
                 .copy()
             )
-
-            yield key, chain
-
 
 
 def load_random_chain(
@@ -150,13 +152,11 @@ def load_random_chain(
     target_dte_days: int | None = None,
     random_state: int | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
-    """
-    Randomly select and load one option chain.
-    
-    Returns a tuple containing the information used to specify a chain,
-    together with the chain itself.
-    """
+    """Select and load one chain at random.
 
+    ``random_state`` should always be supplied in the notebooks: an unseeded
+    draw makes every figure change on re-execution.
+    """
     candidates = catalog
 
     if target_dte_days is not None:
@@ -165,13 +165,38 @@ def load_random_chain(
         ]
 
     if candidates.empty:
+        raise ValueError(f"No chains found for target DTE {target_dte_days}.")
+
+    info = candidates.sample(n=1, random_state=random_state).iloc[0]
+    return info, load_chain(info)
+
+
+def load_settlement_values(path: Path = SET_VALUES_PATH) -> pd.DataFrame:
+    """Load the Cboe SET settlement values written during preprocessing."""
+    if not Path(path).exists():
+        raise FileNotFoundError(
+            f"Settlement values not found. Run preprocessing first: {path}"
+        )
+    return pd.read_parquet(path)
+
+
+def settlement_lookup(settlement_values: pd.DataFrame) -> dict[tuple[int, int], float]:
+    """Index SET values by ``(expiration_year, expiration_month)``.
+
+    Standard monthly SPX options settle once a month against the opening
+    print on the third Friday, so year and month identify the value. Doing
+    the lookup through a dict rather than a DataFrame filter inside the
+    chain loop removes a scan per chain.
+    """
+    duplicated = settlement_values.duplicated(
+        subset=["expiration_year", "expiration_month"], keep=False
+    )
+    if duplicated.any():
         raise ValueError(
-            f"No chains found for target DTE {target_dte_days}"
+            "Settlement values contain more than one entry for a month."
         )
 
-    info = candidates.sample(
-        n=1,
-        random_state=random_state,
-    ).iloc[0]
-
-    return info, load_chain(info)
+    return {
+        (int(row.expiration_year), int(row.expiration_month)): float(row.set_value)
+        for row in settlement_values.itertuples(index=False)
+    }
