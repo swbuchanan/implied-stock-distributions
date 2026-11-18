@@ -17,7 +17,7 @@ from scipy import stats
 from implied_stock_distributions import stats as isd_stats
 
 TESTS = ("mean", "variance_ratio", "share_below_10pct")
-N_EXPIRATIONS = 162     # monthly expirations in the real sample's panel
+N_EXPIRATIONS = 162  # monthly expirations in the real sample's panel
 REPLICATES = 300
 
 
@@ -35,13 +35,17 @@ def _calibrated_panel(generator, n_expirations=N_EXPIRATIONS):
     for months in (1, 2, 3):
         horizon = 30 * months
         path = cumulative[end] - cumulative[end - months]
-        frames.append(pd.DataFrame({
-            "data_date": expirations - pd.Timedelta(days=horizon),
-            "expiration_date": expirations,
-            "target_dte_days": horizon,
-            "actual_dte": horizon,
-            "pit_constrained": stats.norm.cdf(path / np.sqrt(months)),
-        }))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "data_date": expirations - pd.Timedelta(days=horizon),
+                    "expiration_date": expirations,
+                    "target_dte_days": horizon,
+                    "actual_dte": horizon,
+                    "pit_constrained": stats.norm.cdf(path / np.sqrt(months)),
+                }
+            )
+        )
     return pd.concat(frames, ignore_index=True)
 
 
@@ -54,9 +58,7 @@ def _rejection_rates(panel_builder, seed):
         for horizon in rejected:
             panel = panel_builder(frame, horizon)
             result = isd_stats.pit_calibration(panel["pit_constrained"])
-            rejected[horizon] += [
-                result[f"{name}_p_value"] < 0.05 for name in TESTS
-            ]
+            rejected[horizon] += [result[f"{name}_p_value"] < 0.05 for name in TESTS]
 
     return {horizon: counts / REPLICATES for horizon, counts in rejected.items()}
 
@@ -72,8 +74,7 @@ def test_non_overlapping_panel_thins_by_the_horizon():
         panel = isd_stats.non_overlapping_panel(frame, horizon)
         assert len(panel) == expected
         months = (
-            panel["expiration_date"].dt.year * 12
-            + panel["expiration_date"].dt.month
+            panel["expiration_date"].dt.year * 12 + panel["expiration_date"].dt.month
         )
         assert months.diff().dropna().eq(isd_stats.months_spanned(horizon)).all()
 
@@ -82,13 +83,13 @@ def test_non_overlapping_panel_restarts_after_a_gap():
     """An excluded year must not shift the phase of the thinning."""
     frame = _calibrated_panel(np.random.default_rng(0), n_expirations=36)
     years = frame["expiration_date"].dt.year
-    frame = frame.loc[years != 2006]          # 2005 to 2007, minus 2006
+    frame = frame.loc[years != 2006]  # 2005 to 2007, minus 2006
 
     panel = isd_stats.non_overlapping_panel(frame, 90)
     kept = panel["expiration_date"].dt.strftime("%Y-%m").tolist()
 
     assert kept[:4] == ["2005-01", "2005-04", "2005-07", "2005-10"]
-    assert kept[4] == "2007-01"               # first month after the gap
+    assert kept[4] == "2007-01"  # first month after the gap
 
 
 @pytest.fixture(scope="module")
@@ -98,7 +99,8 @@ def thinned_rates():
 
 @pytest.mark.parametrize("horizon", [30, 60, 90])
 def test_a_calibrated_forecast_is_rejected_at_the_nominal_rate_when_thinned(
-    thinned_rates, horizon,
+    thinned_rates,
+    horizon,
 ):
     rates = thinned_rates[horizon]
 
