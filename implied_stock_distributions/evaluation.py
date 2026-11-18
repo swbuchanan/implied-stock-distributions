@@ -59,7 +59,6 @@ __all__ = [
     "probability_integral_transform",
     "evaluate_distribution",
     "distribution_moments",
-    "recentre_on_forward",
     "physical_density_from_rn_grid",
     "tilted_distribution",
     "relative_crps_for_gamma",
@@ -307,50 +306,6 @@ def distribution_moments(strike_grid, density):
         "log_standard_deviation": log_sd,
         "log_skewness": log_skewness,
     }
-
-
-def recentre_on_forward(strike_grid, density, forward, method: str = "scale"):
-    """Move a density's mean onto the forward, leaving its shape alone.
-
-    The shape-constrained fit satisfies ``E_Q[S_T] = F`` as an identity. The
-    implied-volatility baseline does not: clipping the negative regions,
-    renormalising and truncating at ``x_upper * F`` all move the mean, and
-    CRPS is very sensitive to location -- at thirty days a tenth of a per
-    cent of error in the mean is a few index points against a score of
-    around a hundred.
-
-    Scoring this recentred density as a third arm splits the comparison
-    into a location part and a shape part. If the constrained fit's
-    advantage is entirely location, that is a sharper result than the one
-    the raw comparison suggests, and a more interesting one: it says the
-    value of the constrained fit is that it inherits the parity forward.
-
-    ``method`` is ``"scale"`` (multiply the support by ``F / mean``, which
-    keeps the support positive and holds the distribution of *returns*
-    fixed) or ``"shift"`` (add ``F - mean``, which moves the mean while
-    holding the standard deviation in index points fixed).
-    """
-    strike_grid, density = _clean_grid(strike_grid, density)
-    forward = float(forward)
-
-    moments = distribution_moments(strike_grid, density)
-    mean = moments["mean"]
-
-    if not np.isfinite(mean) or mean <= 0:
-        raise ChainQualityError("Cannot recentre a density with a non-positive mean.")
-
-    if method == "scale":
-        factor = forward / mean
-        new_grid = strike_grid * factor
-        # A density transforms with the Jacobian of the change of variable.
-        new_density = density / factor
-    elif method == "shift":
-        new_grid = strike_grid + (forward - mean)
-        new_density = density.copy()
-    else:
-        raise ValueError("method must be 'scale' or 'shift'.")
-
-    return new_grid, new_density
 
 
 def evaluate_distribution(strike_grid, cdf, realized_value, forward, density=None):

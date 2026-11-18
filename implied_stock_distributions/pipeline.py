@@ -7,10 +7,8 @@ the numbers they report come from one implementation of the steps below.
 2. One out-of-the-money quote per strike, as a call price (``fitting``).
 3. The shape-constrained call-price spline and its density (``fitting``).
 4. The implied-volatility baseline on the same quotes (``smoothing``).
-5. The baseline recentred on the parity forward, which separates a location
-   difference from a shape difference (``evaluation.recentre_on_forward``).
-6. A lognormal at the chain's own at-the-money volatility (``benchmarks``).
-7. CRPS and PIT of every forecast against the realised value, all tabulated
+5. A lognormal at the chain's own at-the-money volatility (``benchmarks``).
+6. CRPS and PIT of every forecast against the realised value, all tabulated
    on one shared strike grid (``evaluation``).
 """
 
@@ -20,11 +18,8 @@ import numpy as np
 
 from .benchmarks import atm_implied_volatility, lognormal_forecast
 from .evaluation import (
-    cdf_from_density,
     common_strike_grid,
-    crps_from_cdf,
     evaluate_distribution,
-    recentre_on_forward,
 )
 from .fitting import (
     construct_risk_neutral_distribution_from_spline,
@@ -92,13 +87,6 @@ def score_chain(chain, realized_value: float, roughness_penalty: float) -> dict:
         strike_grid=grid,
     )
 
-    recentred_grid, recentred_density = recentre_on_forward(
-        iv_result["strike_grid"], iv_result["density"], forward
-    )
-    recentred_grid, recentred_cdf = cdf_from_density(
-        recentred_grid, recentred_density
-    )
-
     atm_volatility = atm_implied_volatility(iv_result["iv_of_strike"], forward)
     benchmark = lognormal_forecast(
         forward, atm_volatility, estimates["time_to_expiry"], realized_value,
@@ -143,10 +131,6 @@ def score_chain(chain, realized_value: float, roughness_penalty: float) -> dict:
         "crps_iv": iv_score["crps"],
         "relative_crps_iv": iv_score["relative_crps"],
         "pit_iv": iv_score["pit"],
-
-        "relative_crps_iv_recentred": (
-            crps_from_cdf(recentred_grid, recentred_cdf, realized_value) / forward
-        ),
 
         "crps_lognormal": benchmark["crps"],
         "relative_crps_lognormal": benchmark["relative_crps"],

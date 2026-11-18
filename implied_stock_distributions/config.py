@@ -4,17 +4,12 @@ All model hyperparameters live here rather than in call sites, so that the
 figures in the notebooks and the numbers in the results tables are
 guaranteed to come from the same configuration.
 
-The one thing this module does at import time beyond path construction is
-read the cross-validated roughness penalty from a small JSON file, if the
-selection cell has ever run. That replaces the previous arrangement, in
-which the penalty was marked ``PROVISIONAL`` and the notebook printed
-"paste into config.ROUGHNESS_PENALTY" -- which leaves a reader no way to
-tell whether the published numbers came from the cross-validated value or
-from the placeholder. ``ROUGHNESS_PENALTY_IS_DEFAULT`` answers that
-question directly, and the notebook asserts on it before reporting results.
+Importing this module reads nothing from disk. The one parameter that is
+estimated rather than set -- the roughness penalty -- is chosen by
+``selection.select_roughness_penalty`` and passed explicitly to every fit,
+so no function's default can depend on a file outside the repository.
 """
 
-import json
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -132,30 +127,13 @@ PARITY_USE_SPREAD_WEIGHTS = True
 # with a few hundred strikes the penalty only begins to bite above one, and
 # dominates above ten thousand.
 #
-# The value used is whatever `selection.select_roughness_penalty` last
-# wrote to SELECTED_PENALTY_PATH. The constant below is only the fallback
-# for a fresh clone that has not run the selection cell yet.
+# The value is chosen by cross-validation (`selection.select_roughness_penalty`
+# over ROUGHNESS_PENALTY_GRID below) and passed explicitly to every fit; the
+# notebook and the demo both do this. `selection.save_selected_penalty`
+# records the choice in SELECTED_PENALTY_PATH, and
+# `selection.load_selected_penalty` reads it back, falling back to this
+# default only when nothing has been saved.
 ROUGHNESS_PENALTY_DEFAULT = 100.0
-
-
-def read_selected_penalty(
-    path: Path = SELECTED_PENALTY_PATH,
-    default: float = ROUGHNESS_PENALTY_DEFAULT,
-) -> tuple[float, bool]:
-    """Return ``(penalty, is_default)`` from the saved selection, if any."""
-    path = Path(path)
-
-    if not path.exists():
-        return float(default), True
-
-    try:
-        payload = json.loads(path.read_text())
-        return float(payload["roughness_penalty"]), False
-    except (ValueError, KeyError, OSError):
-        return float(default), True
-
-
-ROUGHNESS_PENALTY, ROUGHNESS_PENALTY_IS_DEFAULT = read_selected_penalty()
 
 UPPER_SUPPORT_MULTIPLE = 2.5
 N_TAIL_KNOTS = 3

@@ -2,12 +2,13 @@
 
 import numpy as np
 import pytest
+from scipy import stats
 
 from implied_stock_distributions.stats import (
     block_bootstrap_mean,
     diebold_mariano,
     newey_west_variance,
-    pit_uniformity,
+    pit_calibration,
     skill_score,
 )
 
@@ -85,24 +86,73 @@ def test_block_bootstrap_is_wider_than_an_iid_interval():
     assert result["standard_error"] > 2 * iid_error
 
 
-def test_pit_uniformity_passes_uniform_values():
-    generator = np.random.default_rng(8)
-    result = pit_uniformity(generator.uniform(size=3000))
-    assert result["ks_p_value"] > 0.05
-    assert result["mean"] == pytest.approx(0.5, abs=0.03)
+def test_pit_calibration_passes_uniform_values():
+    # Evenly spaced PITs: exactly uniform, so every number sits on its null.
+    n = 1000
+    result = pit_calibration((np.arange(n) + 0.5) / n)
+
+    assert result["mean"] == pytest.approx(0.5, abs=1e-12)
+    assert result["variance_ratio"] == pytest.approx(1.0, abs=1e-5)
+    assert result["share_below_10pct"] == pytest.approx(0.1, abs=1e-12)
+    for name in ("mean", "variance_ratio", "share_below_10pct"):
+        assert result[f"{name}_p_value"] > 0.05, name
+    assert (
+        result["share_below_10pct_lower"] < 0.1 < result["share_below_10pct_upper"]
+    )
 
 
-def test_pit_uniformity_detects_too_much_left_tail_mass():
-    """The shape a risk-neutral density should show against outcomes."""
+def test_pit_calibration_reads_a_risk_neutral_forecast():
+    """The shape a risk-neutral density should show against outcomes.
+
+    Outcomes land high (equity premium), cluster toward the middle relative
+    to the forecast's width (variance premium) and rarely in the bottom
+    decile (crash premium). Each number must point the right way.
+    """
     generator = np.random.default_rng(9)
-    values = generator.beta(2.0, 1.2, size=3000)
+    values = generator.beta(2.4, 1.8, size=3000)
 
-    result = pit_uniformity(values)
-    assert result["ks_p_value"] < 1e-6
-    assert result["share_below_10pct"] < 0.1
+    result = pit_calibration(values)
+    assert result["mean"] > 0.5 and result["mean_p_value"] < 1e-6
+    assert result["variance_ratio"] < 1 and result["variance_ratio_p_value"] < 1e-6
+    assert result["share_below_10pct_upper"] < 0.1
+    assert result["share_below_10pct_p_value"] < 1e-6
+
+
+def test_pit_calibration_separates_location_from_width():
+    """A forecast that is only too narrow moves the variance, not the mean."""
+    generator = np.random.default_rng(10)
+    outcomes = generator.normal(size=4000)
+    values = stats.norm.cdf(outcomes / 0.8)      # forecast sd 0.8, truth 1
+
+    result = pit_calibration(values)
+    assert result["mean_p_value"] > 0.01
+    assert result["variance_ratio"] > 1 and result["variance_ratio_p_value"] < 1e-6
 
 
 def test_skill_score_signs():
     assert skill_score(0.5, 1.0) == pytest.approx(0.5)
     assert skill_score(1.0, 1.0) == pytest.approx(0.0)
     assert skill_score(2.0, 1.0) == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("in_tail", [0, 3, 17, 54])
+def test_lowest_decile_interval_is_clopper_pearson(in_tail):
+    n = 54
+    generator = np.random.default_rng(in_tail)
+    values = np.concatenate([
+        generator.uniform(0.0, 0.1, in_tail),
+        generator.uniform(0.1, 1.0, n - in_tail),
+    ])
+
+    result = pit_calibration(values)
+    exact = stats.binomtest(in_tail, n, 0.1).proportion_ci(0.95, method="exact")
+
+    assert result["share_below_10pct"] == pytest.approx(in_tail / n)
+    assert result["share_below_10pct_lower"] == pytest.approx(exact.low, abs=1e-12)
+    assert result["share_below_10pct_upper"] == pytest.approx(exact.high, abs=1e-12)
+
+
+def test_identical_pits_give_no_spread_test():
+    result = pit_calibration(np.full(20, 0.5))
+    assert np.isnan(result["mean_p_value"])
+    assert np.isnan(result["variance_ratio_p_value"])

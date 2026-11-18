@@ -56,7 +56,6 @@ from .config import (
     ROUGHNESS_PENALTY_DEFAULT,
     ROUGHNESS_PENALTY_GRID,
     SELECTED_PENALTY_PATH,
-    read_selected_penalty,
 )
 from .errors import ChainError
 from .fitting import (
@@ -269,15 +268,14 @@ def save_selected_penalty(
     summary: pd.DataFrame | None = None,
     path: Path = SELECTED_PENALTY_PATH,
 ) -> Path:
-    """Write the cross-validated penalty where ``config`` will read it.
+    """Record the cross-validated penalty, and the CV curve behind it.
 
     The notebook used to print "paste into config.ROUGHNESS_PENALTY" next
     to a value marked PROVISIONAL, which leaves a reader to conclude the
-    published results were produced with a placeholder. Writing the number
-    to a small JSON file that ``config`` loads on import removes the manual
-    step and the ambiguity: after the cross-validation cell has run once,
-    ``config.ROUGHNESS_PENALTY`` *is* the cross-validated value, and
-    ``config.ROUGHNESS_PENALTY_IS_DEFAULT`` says so.
+    published results were produced with a placeholder. The selected value
+    is now passed explicitly to every fit, and this file is the record of
+    it: ``load_selected_penalty`` reads it back, and says whether it fell
+    back to the default instead.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,8 +302,16 @@ def load_selected_penalty(
 ) -> tuple[float, bool]:
     """Read the saved penalty, returning ``(value, is_default)``.
 
-    Delegates to ``config`` so that there is exactly one implementation of
-    the read, and ``config.ROUGHNESS_PENALTY`` cannot disagree with what
-    this returns.
+    ``is_default`` is true when nothing usable has been saved and
+    ``default`` is returned instead. Nothing calls this at import time.
     """
-    return read_selected_penalty(path, default)
+    path = Path(path)
+
+    if not path.exists():
+        return float(default), True
+
+    try:
+        payload = json.loads(path.read_text())
+        return float(payload["roughness_penalty"]), False
+    except (ValueError, KeyError, OSError):
+        return float(default), True
