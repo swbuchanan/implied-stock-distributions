@@ -39,9 +39,7 @@ comparison rather than oversights:
   construction; after clipping, renormalising and truncating at
   ``x_upper * F`` this one does not. ``mean_over_forward`` is reported
   alongside ``mass_before_normalisation`` so the size of that displacement
-  is visible, because CRPS is very sensitive to location and part of what
-  looks like a smoothing difference is a location difference. Score
-  ``evaluation.recentre_on_forward`` as a third arm to separate the two.
+  is visible.
 """
 
 from __future__ import annotations
@@ -68,6 +66,7 @@ __all__ = [
     "implied_vols_from_quotes",
     "fit_log_iv_curve",
     "create_density_from_chain",
+    "baseline_diagnostics",
 ]
 
 
@@ -349,3 +348,44 @@ def create_density_from_chain(
         "n_quotes": int(len(strikes)),
         "support": (float(strike_grid[0]), float(strike_grid[-1])),
     }
+
+
+def baseline_diagnostics(
+    scores: pd.DataFrame, horizon_column: str = "target_dte_days"
+) -> pd.DataFrame:
+    """How hard the baseline's smile works, and how much density it clips.
+
+    Two per-chain diagnostics from ``create_density_from_chain``, summarised
+    by horizon and overall: the number of knots in the smoothed smile and
+    the negative density mass clipped before renormalising. A healthy fit
+    has a knot or two and almost nothing clipped. When stale quotes break
+    the spread-based noise estimate, FITPACK adds knots to chase them, and
+    the resulting density is mostly clipped mass; on the synthetic demo
+    that happens on a large share of chains, and these distributions are
+    what say how often it happens on real ones.
+    """
+    frame = pd.DataFrame({
+        "horizon": scores[horizon_column].astype(int).astype(str),
+        "knots": pd.to_numeric(scores["n_smile_knots"], errors="coerce"),
+        "clipped": pd.to_numeric(
+            scores["negative_mass_clipped"], errors="coerce"
+        ).abs(),
+    })
+    order = sorted(frame["horizon"].unique(), key=int) + ["all"]
+    frame = pd.concat([frame, frame.assign(horizon="all")], ignore_index=True)
+
+    grouped = frame.groupby("horizon")
+    table = pd.DataFrame({
+        "chains": grouped.size(),
+        "knots_median": grouped["knots"].median(),
+        "knots_p90": grouped["knots"].quantile(0.9),
+        "knots_max": grouped["knots"].max(),
+        "clipped_mass_median": grouped["clipped"].median(),
+        "clipped_mass_p90": grouped["clipped"].quantile(0.9),
+        "clipped_mass_max": grouped["clipped"].max(),
+        "share_clipped_over_10pct": grouped["clipped"].apply(
+            lambda values: float(np.mean(values > 0.1))
+        ),
+    }).reindex(order)
+    table.index.name = horizon_column
+    return table

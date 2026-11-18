@@ -68,7 +68,7 @@ def test_score_chain_runs_end_to_end_and_honours_the_identities():
 
     for column in (
         "relative_crps_constrained", "relative_crps_iv",
-        "relative_crps_iv_recentred", "relative_crps_lognormal",
+        "relative_crps_lognormal",
         "pit_constrained", "risk_neutral_skewness",
     ):
         assert np.isfinite(scores[column]), column

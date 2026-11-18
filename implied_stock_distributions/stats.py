@@ -27,8 +27,15 @@ same SET print, so their PITs are strongly dependent and a KS or chi-square
 p-value computed across them is anti-conservative by roughly ``sqrt(3)``.
 The number that governs the whole project is the count of distinct
 expirations -- fourteen analysis years at twelve monthly expirations each,
-so of order 170. ``one_per_expiration`` builds that panel, and
-``effective_sample_size`` reports the count.
+so of order 170. ``effective_sample_size`` reports the count.
+
+**One horizon per expiration is still overlapping beyond thirty days.**
+The ninety-day forecasts of consecutive monthly expirations share two months
+of index path, so their PITs are correlated and a nominal 5% test of a
+calibrated forecast rejects about a quarter of the time.
+``one_per_expiration`` keeps one horizon's row per expiration;
+``non_overlapping_panel`` thins it to every second expiration at sixty days
+and every third at ninety, which is the panel ``pit_calibration`` assumes.
 """
 
 from __future__ import annotations
@@ -41,6 +48,9 @@ from scipy import stats
 
 from .config import BOOTSTRAP_RANDOM_STATE, BOOTSTRAP_REPLICATES, DM_LAG_BY_HORIZON
 
+# Average calendar days between consecutive standard monthly expirations.
+DAYS_PER_MONTH = 365.25 / 12
+
 __all__ = [
     "newey_west_variance",
     "diebold_mariano",
@@ -49,8 +59,10 @@ __all__ = [
     "block_bootstrap_mean",
     "nearest_to_target",
     "one_per_expiration",
+    "months_spanned",
+    "non_overlapping_panel",
     "effective_sample_size",
-    "pit_uniformity",
+    "pit_calibration",
     "skill_score",
 ]
 
@@ -293,37 +305,39 @@ def nearest_to_target(
 
 def one_per_expiration(
     frame: pd.DataFrame,
-    horizon: int | None = None,
+    horizon: int,
     horizon_column: str = "target_dte_days",
     expiration_column: str = "expiration_date",
     actual_column: str = "actual_dte",
 ) -> pd.DataFrame:
-    """The genuinely non-overlapping panel: one row per distinct expiration.
+    """One horizon's forecasts, one row per distinct expiration.
 
     Grouping by ``(expiration_date, target_dte_days)`` leaves three rows per
     outcome, because the 30-, 60- and 90-day forecasts of one expiration are
-    all scored against the same SET print. Their PITs are strongly dependent
-    and a KS or chi-square p-value across them is anti-conservative by
-    roughly ``sqrt(3)`` in the standard error.
+    all scored against the same SET print. Keeping one horizon removes that
+    dependence.
 
-    Pass ``horizon`` to keep one horizon's forecasts -- the honest way to
-    run a per-horizon calibration test, since within a horizon consecutive
-    monthly expirations resolve against different prints. Passing ``None``
-    keeps the observation nearest its own target across all horizons, which
-    is the single-number version.
+    ``horizon`` is required. Without it the old default kept, per
+    expiration, the row nearest its own target across all horizons, and
+    since the 30- and 60-day chains both sit on their targets and ties went
+    to the earlier date, that "pooled" panel was in practice a 60-day panel.
+
+    The panel this returns is still not independent beyond thirty days: the
+    ninety-day forecasts of consecutive monthly expirations share two months
+    of index path. ``non_overlapping_panel`` thins it to forecasts whose
+    windows do not overlap; use that for anything with a p-value.
     """
     frame = frame.copy()
 
     if actual_column not in frame.columns:
         frame[actual_column] = (
-            pd.to_datetime(frame["expiration_date"])
+            pd.to_datetime(frame[expiration_column])
             - pd.to_datetime(frame["data_date"])
         ).dt.days
 
-    if horizon is not None:
-        frame = frame.loc[frame[horizon_column].astype(int).eq(int(horizon))]
-        if frame.empty:
-            raise ValueError(f"No observations at the {horizon}-day horizon.")
+    frame = frame.loc[frame[horizon_column].astype(int).eq(int(horizon))]
+    if frame.empty:
+        raise ValueError(f"No observations at the {horizon}-day horizon.")
 
     return nearest_to_target(
         frame,
@@ -331,6 +345,58 @@ def one_per_expiration(
         horizon_column=horizon_column,
         actual_column=actual_column,
     )
+
+
+def months_spanned(horizon: int) -> int:
+    """Monthly expirations a forecast window covers: 1, 2 and 3 at 30, 60, 90.
+
+    Two forecasts of the same horizon overlap unless their expirations are
+    at least this many months apart.
+    """
+    return max(1, round(int(horizon) / DAYS_PER_MONTH))
+
+
+def non_overlapping_panel(
+    frame: pd.DataFrame,
+    horizon: int,
+    horizon_column: str = "target_dte_days",
+    expiration_column: str = "expiration_date",
+    actual_column: str = "actual_dte",
+) -> pd.DataFrame:
+    """Forecasts of one horizon whose windows share no index path.
+
+    Within a horizon consecutive monthly expirations resolve against
+    different prints, but at sixty and ninety days their forecast windows
+    overlap: the ninety-day forecasts for March and April share two months
+    of path. Their PITs are then positively correlated (lag-one correlation
+    near 0.5 at sixty days and 0.65 at ninety), and a nominal 5% test of a
+    perfectly calibrated forecast rejects about 16% and 24% of the time.
+
+    This keeps every ``months_spanned(horizon)``-th expiration -- every one
+    at thirty days, every second at sixty, every third at ninety -- walking
+    forward in calendar months, so a gap in the sample (an excluded year)
+    restarts the count rather than shifting it.
+    """
+    panel = one_per_expiration(
+        frame, horizon,
+        horizon_column=horizon_column,
+        expiration_column=expiration_column,
+        actual_column=actual_column,
+    )
+
+    step = months_spanned(horizon)
+    expirations = pd.to_datetime(panel[expiration_column])
+    months = (expirations.dt.year * 12 + expirations.dt.month).to_numpy()
+
+    order = np.argsort(months, kind="stable")
+    keep = np.zeros(len(panel), dtype=bool)
+    next_allowed = -np.inf
+    for index in order:
+        if months[index] >= next_allowed:
+            keep[index] = True
+            next_allowed = months[index] + step
+
+    return panel.loc[keep].reset_index(drop=True)
 
 
 def effective_sample_size(
@@ -356,66 +422,100 @@ def effective_sample_size(
 # Calibration
 # --------------------------------------------------------------------------
 
-def pit_uniformity(
+def pit_calibration(
     pit_values,
-    n_bins: int = 10,
+    confidence: float = 0.95,
     parameters_estimated: int = 0,
 ) -> dict:
-    """Test whether probability integral transforms are uniform.
+    """Three targeted calibration numbers, each naming an economic quantity.
 
-    Calibrated forecasts produce uniform PITs. Systematic departures name
-    the failure: a hump on the left means the forecasts put too little mass
-    low down, a U shape means they are too narrow overall, and an inverted U
-    means they are too wide.
+    Calibrated forecasts produce uniform PITs. An omnibus test (KS or
+    chi-square) says only that something is wrong; these three say what,
+    and in the direction a risk premium predicts.
 
-    Two conditions have to hold for the p-values to mean anything.
+    * **Location: the mean PIT.** It is 1/2 for a calibrated forecast.
+      Above 1/2 means outcomes land high in the forecast distribution --
+      the direction of a positive equity risk premium.
+    * **Width: the variance of the PIT about 1/2.** It is 1/12 for a
+      calibrated forecast. Below 1/12 means outcomes cluster in the middle,
+      so the forecast is too wide -- the direction of a variance risk
+      premium. Reported as the ratio to 1/12.
+    * **Left tail: the share of outcomes in the lowest decile.** It is 10%
+      for a calibrated forecast. Below 10% means the forecast puts too much
+      mass on crashes -- the direction of a crash risk premium. Reported
+      with an exact (Clopper-Pearson) binomial interval and an exact
+      two-sided binomial p-value.
 
-    *Independence.* The Kolmogorov-Smirnov and chi-square p-values assume
-    independent observations, which overlapping daily forecasts are not.
-    Pass a panel from ``one_per_expiration``.
+    The location and width tests are t-tests with standard errors estimated
+    from the sample rather than taken from the uniform null. That keeps each
+    one about its own target: a forecast that is only too narrow has
+    PITs with more spread than 1/12, and a null standard error would let
+    that leak into the location test. All three assume independent
+    observations: pass a panel from ``non_overlapping_panel``.
 
-    *No estimated parameters.* If the distribution being tested was tuned on
-    these same observations -- as the CRRA-tilted physical density is, since
-    gamma is fitted by minimising the score on them -- the null distribution
-    of the KS statistic is not the tabulated one and the p-value is
-    optimistic by an unknown amount. Set ``parameters_estimated`` to the
+    If the forecast was tuned on these same observations -- as the
+    CRRA-tilted density is, since gamma minimises the score on them -- the
+    null distributions do not apply. Set ``parameters_estimated`` to the
     number fitted in-sample; the p-values are then returned as ``nan`` and
-    the flag is carried in the result, because a number that cannot be
-    interpreted is worse than no number. The bin counts and the shape of
-    the histogram remain informative either way.
+    the intervals are omitted, because a number that cannot be interpreted
+    is worse than no number. The point estimates remain informative.
     """
     values = np.asarray(pit_values, dtype=float)
     values = values[np.isfinite(values)]
 
-    if values.size < 2:
+    n = int(values.size)
+    if n < 2:
         raise ValueError("Too few PIT values.")
 
-    ks_statistic, ks_p_value = stats.kstest(values, "uniform")
+    def two_sided(difference, standard_error):
+        # Identical PITs carry no estimate of spread to test against.
+        if not standard_error > 0:
+            return float("nan")
+        t_statistic = difference / standard_error
+        return float(2.0 * stats.t.sf(abs(t_statistic), df=n - 1))
 
-    counts, edges = np.histogram(values, bins=n_bins, range=(0.0, 1.0))
-    expected = values.size / n_bins
-    chi_square = float(np.sum((counts - expected) ** 2 / expected))
-    chi_p_value = float(1.0 - stats.chi2.cdf(chi_square, df=n_bins - 1))
+    mean = float(values.mean())
+    mean_se = float(values.std(ddof=1) / np.sqrt(n))
+    mean_p = two_sided(mean - 0.5, mean_se)
+
+    squared_deviation = 12.0 * (values - 0.5) ** 2
+    variance_ratio = float(squared_deviation.mean())
+    variance_ratio_se = float(squared_deviation.std(ddof=1) / np.sqrt(n))
+    variance_p = two_sided(variance_ratio - 1.0, variance_ratio_se)
+
+    # Clopper-Pearson: the exact interval, in its closed beta-quantile form.
+    in_lowest_decile = int(np.sum(values < 0.1))
+    alpha = 1.0 - confidence
+    tail_lower = (
+        float(stats.beta.ppf(alpha / 2, in_lowest_decile, n - in_lowest_decile + 1))
+        if in_lowest_decile > 0 else 0.0
+    )
+    tail_upper = (
+        float(stats.beta.ppf(1 - alpha / 2, in_lowest_decile + 1, n - in_lowest_decile))
+        if in_lowest_decile < n else 1.0
+    )
+    tail_p = float(stats.binomtest(in_lowest_decile, n, 0.1).pvalue)
 
     in_sample = int(parameters_estimated) > 0
     if in_sample:
-        ks_p_value = float("nan")
-        chi_p_value = float("nan")
+        mean_p = variance_p = tail_p = float("nan")
+        tail_lower = tail_upper = float("nan")
 
     return {
-        "n_observations": int(values.size),
-        "mean": float(values.mean()),
-        "ks_statistic": float(ks_statistic),
-        "ks_p_value": float(ks_p_value),
-        "chi_square": chi_square,
-        "chi_square_p_value": chi_p_value,
+        "n_observations": n,
+        "mean": mean,
+        "mean_standard_error": mean_se,
+        "mean_p_value": mean_p,
+        "variance_ratio": variance_ratio,
+        "variance_ratio_standard_error": variance_ratio_se,
+        "variance_ratio_p_value": variance_p,
+        "share_below_10pct": in_lowest_decile / n,
+        "share_below_10pct_lower": tail_lower,
+        "share_below_10pct_upper": tail_upper,
+        "share_below_10pct_p_value": tail_p,
+        "confidence": confidence,
         "parameters_estimated": int(parameters_estimated),
         "p_values_valid": not in_sample,
-        "bin_counts": counts,
-        "bin_edges": edges,
-        "expected_per_bin": float(expected),
-        "share_below_10pct": float(np.mean(values < 0.1)),
-        "share_above_90pct": float(np.mean(values > 0.9)),
     }
 
 

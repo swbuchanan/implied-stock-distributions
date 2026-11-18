@@ -40,7 +40,6 @@ from .evaluation import (
     physical_density_from_rn_grid,
     pit_for_gamma,
     probability_integral_transform,
-    recentre_on_forward,
     relative_crps_curve,
     relative_crps_for_gamma,
     tilt_moment_summary,
@@ -65,8 +64,9 @@ from .stats import (
     diebold_mariano,
     effective_sample_size,
     nearest_to_target,
+    non_overlapping_panel,
     one_per_expiration,
-    pit_uniformity,
+    pit_calibration,
     pooled_hac_lag,
     skill_score,
 )
@@ -94,7 +94,6 @@ __all__ = [
     "crps_from_density_grid",
     "probability_integral_transform",
     "distribution_moments",
-    "recentre_on_forward",
     "score_chain",
     "physical_density_from_rn_grid",
     "mean_relative_crps_for_gamma",
@@ -111,8 +110,9 @@ __all__ = [
     "pooled_hac_lag",
     "nearest_to_target",
     "one_per_expiration",
+    "non_overlapping_panel",
     "effective_sample_size",
-    "pit_uniformity",
+    "pit_calibration",
     "skill_score",
 ]
 
