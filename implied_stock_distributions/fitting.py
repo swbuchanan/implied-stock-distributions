@@ -15,7 +15,14 @@ roughness penalty, subject to constraints that make the fitted curve a
 complete probability distribution on ``0 <= S_T <= x_upper * F``:
 
     g(0) = 1,   g'(0) = -1,   g(x_upper) = 0,   g'(x_upper) = 0,
-    g'' >= 0 everywhere,   -1 <= g' <= 0,   g >= max(1 - x, 0).
+    g'' >= 0 everywhere.
+
+In words: a convex curve pinned at both ends. Nothing else is imposed,
+because nothing else is needed. A convex curve lies above its tangents, which
+here are ``1 - x`` at zero and ``0`` at ``x_upper``, so ``g >= max(1 - x, 0)``
+follows; and its slope rises monotonically from ``-1`` to ``0``, so
+``-1 <= g' <= 0`` follows too. The cubic spline's ``g''`` is linear between
+breakpoints, so ``g'' >= 0`` at the breakpoints is ``g'' >= 0`` everywhere.
 
 Two consequences of that boundary set are worth stating, because they are
 free correctness checks on the whole pipeline:
@@ -57,7 +64,6 @@ from .config import (
     MIN_ERROR_FRACTION_OF_FORWARD,
     MIN_QUOTES_FOR_SPLINE,
     N_TAIL_KNOTS,
-    ROUGHNESS_PENALTY,
     UPPER_SUPPORT_MULTIPLE,
 )
 from .errors import ChainQualityError, InsufficientQuotesError, SolverError
@@ -280,8 +286,6 @@ def build_call_spline_program(
     # Symmetrise away the floating-point asymmetry.
     roughness_matrix = 0.5 * (roughness_matrix + roughness_matrix.T)
 
-    intrinsic_values = np.maximum(1.0 - breakpoints, 0.0)
-
     return {
         "knots": knots,
         "degree": DEGREE,
@@ -296,7 +300,6 @@ def build_call_spline_program(
         "first_basis": first_basis,
         "second_basis": second_basis,
         "roughness_matrix": roughness_matrix,
-        "intrinsic_values": intrinsic_values,
         "x_upper": float(x_upper),
     }
 
@@ -355,44 +358,36 @@ def _solve_with_cvxpy(program, roughness_penalty):
 
 
 def constraint_bounds(program: dict):
-    """Express every shape restriction as ``lower <= A c <= upper``.
+    """The shape restrictions as ``lower <= A c <= upper``.
 
-    Stacking the value, slope and curvature blocks in this form keeps the
-    boundary equalities and the interior inequalities in one place, which
-    is what the solver and the tests consume.
+    Four boundary equalities and convexity at every breakpoint: a convex
+    curve pinned at both ends. The bounds on ``g`` and ``g'`` at interior
+    breakpoints follow from these (see the module docstring), so they are
+    not imposed; doing so added about four constraint rows for every one
+    kept and changed the fitted curves by less than 1e-9 of the forward.
     """
     values = program["value_basis"]
     slopes = program["first_basis"]
     second = program["second_basis"]
 
+    boundary = np.vstack([
+        values[0],      # g(0) = 1
+        values[-1],     # g(x_upper) = 0
+        slopes[0],      # g'(0) = -1
+        slopes[-1],     # g'(x_upper) = 0
+    ])
+    boundary_values = np.array([1.0, 0.0, -1.0, 0.0])
+
     n = len(program["breakpoints"])
-    infinity = np.inf
 
-    value_lower = program["intrinsic_values"].astype(float).copy()
-    value_upper = np.ones(n)
-    value_lower[0] = value_upper[0] = 1.0      # g(0) = 1
-    value_lower[-1] = value_upper[-1] = 0.0    # g(x_upper) = 0
-
-    slope_lower = np.full(n, -1.0)
-    slope_upper = np.zeros(n)
-    slope_lower[0] = slope_upper[0] = -1.0     # g'(0) = -1
-    slope_lower[-1] = slope_upper[-1] = 0.0    # g'(x_upper) = 0
-
-    second_lower = np.zeros(n)                 # non-negative density
-    second_upper = np.full(n, infinity)
-    second_upper[0] = 0.0                      # g''(0) = 0
-    second_upper[-1] = 0.0                     # g''(x_upper) = 0
-
-    matrix = np.vstack([values, slopes, second])
-    lower = np.concatenate([value_lower, slope_lower, second_lower])
-    upper = np.concatenate([value_upper, slope_upper, second_upper])
+    matrix = np.vstack([boundary, second])
+    lower = np.concatenate([boundary_values, np.zeros(n)])          # g'' >= 0
+    upper = np.concatenate([boundary_values, np.full(n, np.inf)])
 
     return matrix, lower, upper
 
 
-def solve_call_spline_program(
-    program: dict, roughness_penalty: float = ROUGHNESS_PENALTY
-):
+def solve_call_spline_program(program: dict, roughness_penalty: float):
     """Solve an assembled program; return coefficients, status and objective."""
     if roughness_penalty < 0:
         raise ValueError("roughness_penalty must be non-negative.")
@@ -407,7 +402,8 @@ def fit_shape_constrained_call_spline(
     chain: pd.DataFrame,
     forward: float | None = None,
     risk_free_rate: float | None = None,
-    roughness_penalty: float = ROUGHNESS_PENALTY,
+    *,
+    roughness_penalty: float,
     upper_support_multiple: float = UPPER_SUPPORT_MULTIPLE,
     n_tail_knots: int = N_TAIL_KNOTS,
     quotes: pd.DataFrame | None = None,
@@ -424,8 +420,9 @@ def fit_shape_constrained_call_spline(
         them is the normal path inside loops, where the parity fit has
         already been done once for the chain.
     roughness_penalty : float
-        Weight on Fengler's penalty. Defaults to the value in ``config``,
-        which is set by cross-validation rather than by inspection.
+        Weight on Fengler's penalty. Required: it is set by cross-validation
+        (``selection.select_roughness_penalty``), and the caller passes the
+        selected value explicitly so that no default can stand in for it.
     upper_support_multiple : float
         The fitted distribution is supported on ``[0, this * F]``.
     quotes : pandas.DataFrame, optional

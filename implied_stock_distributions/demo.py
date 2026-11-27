@@ -3,9 +3,10 @@
     python -m implied_stock_distributions.demo
 
 Generates synthetic SPX-like chains whose true density is known in closed
-form, runs the whole pipeline over them -- parity fit, both smoothers,
-CRPS, the inference, the CRRA tilt -- and prints the numbers plus one
-figure. It takes about a minute.
+form, runs the whole pipeline over them -- penalty selection by
+cross-validation, parity fit, both smoothers, CRPS, the inference, the
+calibration tests, the CRRA tilt -- and prints the numbers plus one figure.
+It takes a few minutes, most of it cross-validation.
 
 The point is not the demonstration. It is that a reader can check the code
 does what the notebook says it does, which is otherwise impossible here
@@ -36,15 +37,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .config import (
+    CV_HOLDOUT_STRIDE,
+    CV_RANDOM_STATE,
+    ROUGHNESS_PENALTY_GRID,
+)
 from .errors import ChainError, failure_reason
 from .evaluation import crps_from_cdf, gamma_plausible_interval, relative_crps_curve
 from .pipeline import score_chain
+from .selection import select_roughness_penalty
+from .smoothing import baseline_diagnostics
 from .stats import (
     block_bootstrap_mean,
     diebold_mariano,
     effective_sample_size,
-    one_per_expiration,
-    pit_uniformity,
+    months_spanned,
+    non_overlapping_panel,
+    pit_calibration,
     pooled_hac_lag,
     skill_score,
 )
@@ -52,7 +61,28 @@ from .synthetic import SyntheticMarket, generate_sample
 from .validation import risk_neutral_skewness
 
 
-def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=True):
+def select_penalty(chains, n_chains: int, verbose: bool = True):
+    """Cross-validate the roughness penalty, exactly as the notebook does.
+
+    Same grid, same held-out stride, same one-standard-error rule, on a
+    random sample of the chains. The choice is not saved: it describes the
+    synthetic market, and must not stand in for the real selection.
+    """
+    generator = np.random.default_rng(CV_RANDOM_STATE)
+    picks = generator.choice(len(chains), size=min(n_chains, len(chains)),
+                             replace=False)
+    sample = [chains[index] for index in sorted(picks)]
+
+    selected, summary, _ = select_roughness_penalty(
+        sample,
+        penalties=ROUGHNESS_PENALTY_GRID,
+        stride=CV_HOLDOUT_STRIDE,
+        progress_every=50 if verbose else None,
+    )
+    return selected, summary
+
+
+def score_chains(chains, settlement, models, roughness_penalty, verbose=True):
     """Score every synthetic chain, and compare each fit with the truth."""
     rows, cached, failures = [], [], []
     started = time.time()
@@ -122,7 +152,8 @@ def score_chains(chains, settlement, models, roughness_penalty=100.0, verbose=Tr
 
 
 def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
-        gamma: float = 2.5, figure_path: Path | None = None):
+        gamma: float = 2.5, cv_chains: int = 60,
+        figure_path: Path | None = None):
     """Run the whole demonstration and print the results."""
     market = SyntheticMarket(n_months=months, seed=seed, gamma=gamma)
 
@@ -146,9 +177,13 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
         for r in settlement_values.itertuples(index=False)
     }
 
-    print(f"Scoring {len(chains)} chains ...")
+    print(f"Cross-validating the roughness penalty on {min(cv_chains, len(chains))} "
+          "chains ...")
+    penalty, cv_summary = select_penalty(chains, cv_chains)
+
+    print(f"Scoring {len(chains)} chains at the selected penalty {penalty:g} ...")
     scores, cached, failures = score_chains(
-        chains, settlement, truth["models"]
+        chains, settlement, truth["models"], roughness_penalty=penalty
     )
 
     if scores.empty:
@@ -166,12 +201,23 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
 
     print()
     print("=" * 68)
+    print("ROUGHNESS PENALTY  (cross-validated, one-standard-error rule)")
+    print("=" * 68)
+    print(f"  {'penalty':>9s}  {'median held-out error':>21s}  {'se':>6s}")
+    for row in cv_summary.itertuples(index=False):
+        marker = "  <- selected" if row.selected else (
+            "  (within one se)" if row.within_one_se else ""
+        )
+        print(f"  {row.roughness_penalty:>9g}  {row.median_held_out_error:>21.4f}  "
+              f"{row.standard_error:>6.4f}{marker}")
+
+    print()
+    print("=" * 68)
     print("SCORES  (mean relative CRPS; lower is better)")
     print("=" * 68)
     methods = {
         "relative_crps_truth": "True density (the floor)",
         "relative_crps_constrained": "Shape-constrained",
-        "relative_crps_iv_recentred": "IV smoothing, recentred on F",
         "relative_crps_iv": "IV smoothing",
         "relative_crps_lognormal": "Lognormal at ATM vol",
     }
@@ -181,16 +227,21 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
               f"skill vs lognormal {skill:+.4f}")
 
     print()
-    print("  Location versus shape:")
+    print("=" * 68)
+    print("THE BASELINE'S SMILE  (knots, and negative density mass clipped)")
+    print("=" * 68)
+    diagnostics = baseline_diagnostics(scores)
+    print(f"  {'horizon':>7s}  {'chains':>6s}  {'knots: median':>13s} {'p90':>4s} "
+          f"{'max':>4s}  {'clipped: median':>15s} {'p90':>6s} {'max':>6s}  "
+          f"{'> 10%':>5s}")
+    for horizon, row in diagnostics.iterrows():
+        print(f"  {horizon:>7s}  {int(row.chains):>6d}  {row.knots_median:>13.0f} "
+              f"{row.knots_p90:>4.0f} {row.knots_max:>4.0f}  "
+              f"{row.clipped_mass_median:>15.4f} {row.clipped_mass_p90:>6.3f} "
+              f"{row.clipped_mass_max:>6.3f}  {row.share_clipped_over_10pct:>5.0%}")
     displacement = scores["iv_mean_over_forward"] - 1.0
-    gap_raw = (scores["relative_crps_iv"]
-               - scores["relative_crps_constrained"]).mean()
-    gap_recentred = (scores["relative_crps_iv_recentred"]
-                     - scores["relative_crps_constrained"]).mean()
-    print(f"    IV baseline mean / forward: {1 + displacement.mean():.5f} "
+    print(f"  IV baseline mean / forward: {1 + displacement.mean():.5f} "
           f"(median {1 + displacement.median():.5f})")
-    print(f"    IV minus constrained, raw:       {gap_raw:+.5f}")
-    print(f"    IV minus constrained, recentred: {gap_recentred:+.5f}")
 
     print()
     print("=" * 68)
@@ -218,15 +269,20 @@ def run(max_chains: int = 240, months: int = 14, seed: int = 20260903,
 
     print()
     print("=" * 68)
-    print("CALIBRATION  (one observation per expiration)")
+    print("CALIBRATION  (non-overlapping forecasts of each horizon)")
     print("=" * 68)
+    print("  Calibrated: mean PIT 0.5, variance ratio 1, 10% in the lowest decile.")
     for horizon in sorted(scores["target_dte_days"].unique()):
-        panel = one_per_expiration(scores, horizon=int(horizon))
-        result = pit_uniformity(panel["pit_constrained"])
-        print(f"  {int(horizon):>3}-day: n = {result['n_observations']:>3}, "
-              f"KS p = {result['ks_p_value']:.4f}, "
-              f"mean PIT = {result['mean']:.3f}, "
-              f"share below 10% = {result['share_below_10pct']:.3f}")
+        panel = non_overlapping_panel(scores, int(horizon))
+        result = pit_calibration(panel["pit_constrained"])
+        print(f"  {int(horizon):>3}-day, every {months_spanned(horizon)} month(s), "
+              f"n = {result['n_observations']:>3}: "
+              f"mean {result['mean']:.3f} (p {result['mean_p_value']:.2f}), "
+              f"variance ratio {result['variance_ratio']:.2f} "
+              f"(p {result['variance_ratio_p_value']:.2f}), "
+              f"lowest decile {result['share_below_10pct']:.0%} "
+              f"[{result['share_below_10pct_lower']:.0%}, "
+              f"{result['share_below_10pct_upper']:.0%}]")
 
     print()
     print("=" * 68)
@@ -299,11 +355,18 @@ def _figure(scores, gamma_grid, interval, truth, path: Path):
     axes[0].set_title("Scores by horizon")
     axes[0].legend(fontsize=8)
 
-    axes[1].hist(scores["l1_error_constrained"], bins=30,
-                 color=PALETTE["constrained"], alpha=0.85, label="Shape-constrained")
-    axes[1].hist(scores["l1_error_iv"], bins=30,
+    # One set of log-spaced bins for both: the constrained fit's errors sit
+    # in a band near 0.04 while the baseline's run out to the maximum of 2,
+    # so linear bins would squeeze the first into a single bar.
+    errors = pd.concat([scores["l1_error_constrained"], scores["l1_error_iv"]])
+    errors = errors[np.isfinite(errors) & (errors > 0)]
+    bins = np.geomspace(errors.min(), errors.max(), 40)
+    axes[1].hist(scores["l1_error_iv"], bins=bins,
                  color=PALETTE["iv"], alpha=0.6, label="IV smoothing")
-    axes[1].set_xlabel(r"$L^1$ distance from the true density")
+    axes[1].hist(scores["l1_error_constrained"], bins=bins,
+                 color=PALETTE["constrained"], alpha=0.75, label="Shape-constrained")
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel(r"$L^1$ distance from the true density (log scale)")
     axes[1].set_ylabel("Chains")
     axes[1].set_title("Recovery error against a known truth")
     axes[1].legend(fontsize=8)
@@ -333,6 +396,8 @@ def _main(argv=None):
     parser.add_argument("--months", type=int, default=14)
     parser.add_argument("--seed", type=int, default=20260903)
     parser.add_argument("--gamma", type=float, default=2.5)
+    parser.add_argument("--cv-chains", type=int, default=60,
+                        help="chains sampled for cross-validating the penalty")
     parser.add_argument("--figure", default="figures/synthetic_demo.png")
     args = parser.parse_args(argv)
 
@@ -341,6 +406,7 @@ def _main(argv=None):
         months=args.months,
         seed=args.seed,
         gamma=args.gamma,
+        cv_chains=args.cv_chains,
         figure_path=Path(args.figure) if args.figure else None,
     )
 

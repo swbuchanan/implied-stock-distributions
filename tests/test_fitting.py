@@ -13,6 +13,7 @@ the data are and are therefore checked on every fit:
 
 import numpy as np
 import pytest
+from scipy.interpolate import BSpline
 
 from implied_stock_distributions.errors import ChainQualityError
 from implied_stock_distributions.fitting import (
@@ -20,6 +21,7 @@ from implied_stock_distributions.fitting import (
     constraint_bounds,
     construct_risk_neutral_distribution_from_spline,
     fit_shape_constrained_call_spline,
+    pricing_error_scale,
     select_call_equivalent_quotes,
 )
 from implied_stock_distributions.forwards import estimate_forward_and_rate
@@ -155,10 +157,66 @@ def test_constraint_bounds_describe_the_same_program():
     program = build_call_spline_program(x, y, np.full_like(y, 1e-4), 2.5)
     matrix, lower, upper = constraint_bounds(program)
 
-    assert matrix.shape[0] == 3 * len(program["breakpoints"])
+    # Four boundary equalities, then convexity at every breakpoint.
+    assert matrix.shape[0] == 4 + len(program["breakpoints"])
     assert np.all(lower <= upper)
-    # The six boundary conditions are the rows where lower equals upper.
-    assert int(np.sum(lower == upper)) == 6
+    assert int(np.sum(lower == upper)) == 4
+    np.testing.assert_array_equal(lower[:4], [1.0, 0.0, -1.0, 0.0])
+    np.testing.assert_array_equal(lower[4:], 0.0)
+    assert np.all(np.isinf(upper[4:]))
+
+
+def test_the_minimal_constraint_set_implies_the_dropped_bounds():
+    """A convex curve pinned at both ends needs nothing else.
+
+    The value bounds ``max(1 - x, 0) <= g <= 1`` and the slope bounds
+    ``-1 <= g' <= 0`` used to be imposed at every breakpoint. They follow
+    from convexity and the four boundary conditions, so adding them back
+    must not change the fit, and the fit without them must satisfy them.
+    """
+    import cvxpy as cp
+
+    chain, _ = synthetic_chain(strike_step=25.0)
+    fit = _fit(chain, roughness_penalty=10.0)
+    breakpoints = fit["breakpoints"]
+
+    values = fit["spline"](breakpoints)
+    slopes = fit["spline"].derivative(1)(breakpoints)
+    tolerance = 1e-7
+    assert np.all(values >= np.maximum(1.0 - breakpoints, 0.0) - tolerance)
+    assert np.all(values <= 1.0 + tolerance)
+    assert np.all(slopes >= -1.0 - tolerance)
+    assert np.all(slopes <= tolerance)
+
+    # The same program with the redundant rows added back.
+    estimates, _ = estimate_forward_and_rate(chain)
+    forward = estimates["forward"]
+    discount = estimates["discount_factor"]
+    quotes = fit["quotes"]
+    x = quotes["strike_price"].to_numpy(float) / forward
+    y = quotes["call_equivalent_price"].to_numpy(float) / (discount * forward)
+    scale = pricing_error_scale(quotes["spread"].to_numpy(float), forward, discount)
+    program = build_call_spline_program(x, y, scale, fit["x_upper"])
+
+    matrix, lower, upper = constraint_bounds(program)
+    c = cp.Variable(program["n_coefficients"])
+    objective = cp.Minimize(
+        cp.sum_squares(cp.multiply(1 / scale, program["basis_matrix"] @ c - y))
+        + 10.0 * cp.quad_form(c, cp.psd_wrap(program["roughness_matrix"]))
+    )
+    full_constraints = [
+        matrix[np.isfinite(lower)] @ c >= lower[np.isfinite(lower)],
+        matrix[np.isfinite(upper)] @ c <= upper[np.isfinite(upper)],
+        program["value_basis"] @ c >= np.maximum(1.0 - breakpoints, 0.0),
+        program["value_basis"] @ c <= 1.0,
+        program["first_basis"] @ c >= -1.0,
+        program["first_basis"] @ c <= 0.0,
+    ]
+    cp.Problem(objective, full_constraints).solve(solver=cp.CLARABEL)
+
+    dense = np.linspace(0.0, fit["x_upper"], 2000)
+    full_curve = BSpline(program["knots"], c.value, 3, extrapolate=False)(dense)
+    np.testing.assert_allclose(fit["spline"](dense), full_curve, atol=1e-7)
 
 
 def test_duplicate_strikes_are_rejected():

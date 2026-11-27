@@ -19,7 +19,6 @@ From the last full run of `notebooks/02_project.ipynb` on the licensed data: 6,7
 | ---------------------------- | ------------------ | ----------------------------- |
 | Shape-constrained            | 0.03278            | 4.8%                          |
 | IV smoothing                 | 0.03313            | 3.8%                          |
-| IV smoothing, recentred on F | 0.03320            | 3.5%                          |
 | Lognormal at ATM implied vol | 0.03442            | —                             |
 
 How to read it:
@@ -30,7 +29,12 @@ How to read it:
 - The CRRA tilt is not identified: the best risk aversion is about 1.6, but the 95% interval covers the whole grid from 0 to 5.
   The synthetic demo's interval also covers the whole grid, which points to CRPS as the estimator rather than the data, though the demo's gamma check is not a clean known-truth test (see section 3.5 of the [review](docs/review-2026-11.md)).
 
+- Calibration: on the 30-day panel, the only one whose forecast windows do not overlap, the risk-neutral density was not detectably miscalibrated (mean PIT 0.529, 9.9% of outcomes in the lowest decile, KS p = 0.10).
+  That run's 60- and 90-day tests used overlapping windows, which make a nominal 5% test reject a calibrated forecast 16% and 24% of the time, so their p-values are not valid.
+  The notebook now thins those horizons to non-overlapping forecasts and reports the mean PIT, the PIT variance and the lowest-decile share separately; those numbers replace these on the next run.
+
 The conclusion cell of the notebook renders these numbers from the results it has just computed.
+Cells changed since that run still show its output and say so.
 
 ## Run it without any data
 
@@ -44,14 +48,16 @@ uv run pytest
 uv run python -m implied_stock_distributions.demo
 ```
 
-The demo takes about half a minute.
-It runs the whole pipeline on synthetic chains, prints the scores, the inference and the estimated gamma against the one used to draw the outcomes, and writes `figures/synthetic_demo.png`:
+The demo takes under two minutes.
+It runs the whole pipeline on synthetic chains, choosing the roughness penalty by the same cross-validation as the notebook, and prints the scores, the baseline's smile diagnostics, the inference, the calibration tests and the estimated gamma against the one used to draw the outcomes.
+It writes `figures/synthetic_demo.png`:
 
 ![Synthetic demonstration](figures/synthetic_demo.png)
 
 Because the truth is known there, the demo can measure what the real data cannot.
 The shape-constrained fit's mean CRPS is indistinguishable from the true density's.
-Its median L¹ distance from the true density is 0.07 against 0.11 for the implied-volatility baseline, and the baseline's occasional badly behaved fits push its mean distance to six times the constrained fit's.
+Its median L¹ distance from the true density is 0.04 against 0.11 for the implied-volatility baseline.
+The baseline's fits are bad on a large share of chains, not occasionally: its smile has a median of 12 knots at 30 days, and more than 10% negative mass is clipped on 45% of chains, which pushes its mean distance to twelve times the constrained fit's.
 
 To write a synthetic dataset that the analysis notebook loads unchanged:
 
@@ -98,19 +104,22 @@ docs/
 ## What is worth looking at
 
 **The fit is a probability distribution by construction, and says so.**
-The boundary conditions `g(0) = 1`, `g'(0) = -1`, `g(x_max) = 0`, `g'(x_max) = 0` imply two exact identities: the fitted density integrates to one, and its mean equals the forward implied by put–call parity.
+The fitted call-price curve is a convex curve pinned at both ends: the boundary conditions `g(0) = 1`, `g'(0) = -1`, `g(x_max) = 0`, `g'(x_max) = 0` and `g'' >= 0` are the only constraints, and every other no-arbitrage bound follows from them.
+The boundary conditions also imply two exact identities: the fitted density integrates to one, and its mean equals the forward implied by put–call parity.
 Both are reported on every chain as correctness checks rather than imposed by renormalising afterwards.
 
 **The baseline is a fair one.**
 The implied-volatility baseline uses the same out-of-the-money quotes, the same support (volatility extrapolated flat beyond the traded strikes), and a smoothing bound set from each quote's estimated noise rather than a number chosen by eye.
 
 **The free parameter is selected, not chosen.**
-The roughness penalty is set by leave-out-every-fifth-strike cross-validation on out-of-sample pricing error, measured in half-spreads.
+The roughness penalty is set by leave-out-every-fifth-strike cross-validation on out-of-sample pricing error, measured in half-spreads, and passed explicitly to every fit.
 Nothing about the realised outcome enters, so the selection is independent of the evaluation.
+The headline results are re-run at every penalty the cross-validation cannot tell apart.
 
 **The comparisons carry honest standard errors.**
 Each expiration is forecast on about twenty-one consecutive trading days, and all three horizons of one expiration are scored against the same settlement print, so several thousand chains are only 170 independent outcomes.
 Differences in mean score are tested with Diebold–Mariano using a Newey–West variance, and with a bootstrap over whole expiration months.
+Calibration is tested per horizon on forecasts whose windows do not overlap, with three numbers that each name a risk premium: the mean PIT (equity), its variance (variance) and the share of outcomes in the lowest decile (crash).
 
 **The outputs are checked against series the pipeline never sees.**
 The short rate and dividend yield implied by the parity regression are compared with FRED and Shiller data, and the risk-neutral skewness with Cboe's SKEW index (not yet like-for-like; see section 3.1 of the [review](docs/review-2026-11.md)).

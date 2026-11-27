@@ -138,41 +138,8 @@ def test_crps_and_pit_describe_one_distribution():
 
 
 # ==========================================================================
-# 2.2 -- location versus shape
+# 2.2 -- the baseline's location
 # ==========================================================================
-
-def test_recentring_puts_the_mean_on_the_forward():
-    grid = np.linspace(1.0, 8000.0, 4000)
-    scale = 0.2
-    mean_log = np.log(4200.0) - 0.5 * scale**2
-    density = stats.lognorm.pdf(grid, s=scale, scale=np.exp(mean_log))
-
-    before = evaluation.distribution_moments(grid, density)["mean"]
-    assert before == pytest.approx(4200.0, rel=1e-3)
-
-    for method in ("scale", "shift"):
-        new_grid, new_density = evaluation.recentre_on_forward(
-            grid, density, FORWARD, method=method
-        )
-        after = evaluation.distribution_moments(new_grid, new_density)["mean"]
-        assert after == pytest.approx(FORWARD, rel=1e-6), method
-
-
-def test_recentring_by_scaling_preserves_shape_in_log_space():
-    """A multiplicative recentre moves location only, in log terms."""
-    grid = np.linspace(1.0, 8000.0, 4000)
-    scale = 0.2
-    density = stats.lognorm.pdf(grid, s=scale, scale=4000.0)
-
-    before = evaluation.distribution_moments(grid, density)
-    new_grid, new_density = evaluation.recentre_on_forward(grid, density, FORWARD)
-    after = evaluation.distribution_moments(new_grid, new_density)
-
-    assert after["log_standard_deviation"] == pytest.approx(
-        before["log_standard_deviation"], rel=1e-6
-    )
-    assert after["log_skewness"] == pytest.approx(before["log_skewness"], rel=1e-4)
-
 
 def test_iv_baseline_reports_its_own_displacement():
     """``mean_over_forward`` must be present, so 2.2 can be measured."""
@@ -247,10 +214,19 @@ def _panel():
 
 def test_one_row_per_expiration_not_per_expiration_and_horizon():
     panel = _panel()
-    reduced = isd_stats.one_per_expiration(panel)
 
-    assert len(reduced) == panel["expiration_date"].nunique() == 12
-    assert not reduced["expiration_date"].duplicated().any()
+    for horizon in (30, 60, 90):
+        reduced = isd_stats.one_per_expiration(panel, horizon)
+        assert len(reduced) == panel["expiration_date"].nunique() == 12
+        assert not reduced["expiration_date"].duplicated().any()
+        assert reduced["target_dte_days"].eq(horizon).all()
+        assert reduced["actual_dte"].eq(horizon).all()
+
+
+def test_one_per_expiration_requires_a_horizon():
+    """The old default pooled horizons and was in practice a 60-day panel."""
+    with pytest.raises(TypeError):
+        isd_stats.one_per_expiration(_panel())
 
 
 def test_nearest_to_target_is_not_biased_toward_short_maturities():
@@ -282,16 +258,17 @@ def test_pit_p_values_are_suppressed_when_parameters_were_fitted():
     generator = np.random.default_rng(1)
     values = generator.uniform(size=200)
 
-    honest = isd_stats.pit_uniformity(values)
-    in_sample = isd_stats.pit_uniformity(values, parameters_estimated=1)
+    honest = isd_stats.pit_calibration(values)
+    in_sample = isd_stats.pit_calibration(values, parameters_estimated=1)
 
-    assert np.isfinite(honest["ks_p_value"])
     assert honest["p_values_valid"]
-    assert np.isnan(in_sample["ks_p_value"])
-    assert np.isnan(in_sample["chi_square_p_value"])
     assert not in_sample["p_values_valid"]
-    # The statistic itself is unchanged; only its p-value is withheld.
-    assert in_sample["ks_statistic"] == pytest.approx(honest["ks_statistic"])
+    for name in ("mean", "variance_ratio", "share_below_10pct"):
+        assert np.isfinite(honest[f"{name}_p_value"]), name
+        assert np.isnan(in_sample[f"{name}_p_value"]), name
+        # The point estimate is unchanged; only its p-value is withheld.
+        assert in_sample[name] == pytest.approx(honest[name]), name
+    assert np.isnan(in_sample["share_below_10pct_lower"])
 
 
 # ==========================================================================
